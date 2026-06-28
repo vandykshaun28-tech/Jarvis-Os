@@ -1,48 +1,105 @@
 import re
 import os
+import sys
+import subprocess
+import json
+import importlib.util
 from datetime import datetime
+from pathlib import Path
 
+# ── Paths ───────────────────────────────────────
+_brain_dir = os.path.dirname(os.path.abspath(__file__))
+_root_dir  = os.path.dirname(_brain_dir)
+
+# Add both to sys.path so local imports work
+for _p in [_root_dir, _brain_dir]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# ── MemoryStore (load directly to avoid memory.py clash) ──
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+_mem_mod    = _load("_mem", os.path.join(_root_dir, "memory", "memory.py"))
+MemoryStore = _mem_mod.MemoryStore
+
+# ── Anthropic ───────────────────────────────────
 from anthropic import Anthropic
-from memory.memory import MemoryStore
 
+# ── ObsidianBridge ──────────────────────────────
 try:
-    from memory.obsidian_memory import ObsidianBridge
-    OBSIDIAN_OK = True
-except Exception:
-    OBSIDIAN_OK = False
-
-try:
-    from web_search import WebSearch
-    WEB_OK = True
-except Exception:
-    WEB_OK = False
-
-try:
-    from task_manager import TaskManager
-    TASKS_OK = True
+    _obs_mod      = _load("_obs", os.path.join(_root_dir, "memory", "obsidian_memory.py"))
+    ObsidianBridge = _obs_mod.ObsidianBridge
+    OBSIDIAN_OK   = True
 except Exception as e:
-    print(f"[Brain] Task manager not loaded: {e}")
-    TASKS_OK = False
+    print(f"[Brain] Obsidian: {e}")
+    OBSIDIAN_OK   = False
 
+# ── WebSearch ───────────────────────────────────
 try:
-    from agent import JarvisAgent
-    AGENT_OK = True
+    _ws_path = os.path.join(_brain_dir, "web_search.py")
+    if not os.path.exists(_ws_path):
+        _ws_path = os.path.join(_root_dir, "web_search.py")
+    _ws_mod   = _load("_ws", _ws_path)
+    WebSearch = _ws_mod.WebSearch
+    WEB_OK    = True
 except Exception as e:
-    print(f"[Brain] Agent not loaded: {e}")
-    AGENT_OK = False
+    print(f"[Brain] Web: {e}")
+    WEB_OK    = False
+
+# ── TaskManager ─────────────────────────────────
+try:
+    _tm_mod      = _load("_tm", os.path.join(_brain_dir, "task_manager.py"))
+    TaskManager  = _tm_mod.TaskManager
+    TASKS_OK     = True
+except Exception as e:
+    print(f"[Brain] Tasks: {e}")
+    TASKS_OK     = False
+
+# ── JarvisAgent ─────────────────────────────────
+try:
+    _ag_mod      = _load("_ag", os.path.join(_brain_dir, "agent.py"))
+    JarvisAgent  = _ag_mod.JarvisAgent
+    AGENT_OK     = True
+except Exception as e:
+    print(f"[Brain] Agent: {e}")
+    AGENT_OK     = False
+
+# ── Researcher ──────────────────────────────────
+try:
+    _rs_mod      = _load("_rs", os.path.join(_brain_dir, "researcher.py"))
+    Researcher   = _rs_mod.Researcher
+    RESEARCH_OK  = True
+except Exception as e:
+    print(f"[Brain] Researcher: {e}")
+    RESEARCH_OK  = False
+
+# ── PCControl ───────────────────────────────────
+try:
+    _pc_mod      = _load("_pc", os.path.join(_brain_dir, "pc_control.py"))
+    PCControl    = _pc_mod.PCControl
+    PC_OK        = True
+except Exception as e:
+    print(f"[Brain] PC Control: {e}")
+    PC_OK        = False
 
 
-VAULT_PATH = r"C:\Users\gameboks\OneDrive\Documents\JARVIS_CORE"
+VAULT_PATH     = r"C:\Users\gameboks\OneDrive\Documents\JARVIS_CORE"
+KNOWLEDGE_FILE = Path(r"C:\jarvis_v18\memory\knowledge.json")
+SESSION_FILE   = Path(r"C:\jarvis_v18\memory\last_session.json")
 
 
 class JarvisBrain:
 
     def __init__(self, voice_callback=None, chat_callback=None):
-        self.memory = MemoryStore()
-        self.client = Anthropic()
+        self.memory               = MemoryStore()
+        self.client               = Anthropic()
         self.conversation_history = []
-        self.voice_callback = voice_callback
-        self.chat_callback  = chat_callback
+        self.voice_callback       = voice_callback
+        self.chat_callback        = chat_callback
 
         # Obsidian
         self.obsidian = None
@@ -50,17 +107,17 @@ class JarvisBrain:
             try:
                 self.obsidian = ObsidianBridge(VAULT_PATH)
             except Exception as e:
-                print(f"Obsidian init error: {e}")
+                print(f"Obsidian error: {e}")
 
-        # Web search
+        # Web
         self.web = None
         if WEB_OK:
             try:
                 self.web = WebSearch()
             except Exception as e:
-                print(f"Web init error: {e}")
+                print(f"Web error: {e}")
 
-        # Task manager
+        # Tasks
         self.tasks = None
         if TASKS_OK:
             try:
@@ -69,9 +126,31 @@ class JarvisBrain:
                     chat_callback=chat_callback
                 )
             except Exception as e:
-                print(f"Tasks init error: {e}")
+                print(f"Tasks error: {e}")
 
-        # Autonomous agent
+        # PC Control
+        self.pc = None
+        if PC_OK:
+            try:
+                self.pc = PCControl(on_status=chat_callback)
+                print("[Brain] PC control online.")
+            except Exception as e:
+                print(f"PC control error: {e}")
+
+        # Researcher
+        self.researcher = None
+        if RESEARCH_OK:
+            try:
+                self.researcher = Researcher(
+                    memory_store=self.memory,
+                    obsidian=self.obsidian,
+                    on_progress=chat_callback,
+                    on_complete=self._on_research_complete
+                )
+            except Exception as e:
+                print(f"Researcher error: {e}")
+
+        # Agent
         self.agent = None
         if AGENT_OK:
             try:
@@ -82,7 +161,43 @@ class JarvisBrain:
                 )
                 self.agent.start()
             except Exception as e:
-                print(f"Agent init error: {e}")
+                print(f"Agent error: {e}")
+
+        self._load_session()
+        print("[Brain] JarvisBrain ready.")
+
+
+    def _load_session(self):
+        try:
+            if SESSION_FILE.exists():
+                data   = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+                last   = data.get("last_active", "unknown")
+                topics = data.get("studied_topics", [])
+                print(f"[Brain] Last session: {last}")
+                if topics:
+                    print(f"[Brain] Previously studied: {', '.join(topics)}")
+        except Exception as e:
+            print(f"[Brain] Session load: {e}")
+
+    def _save_session(self):
+        try:
+            topics = list(self.researcher.knowledge.keys()) if self.researcher else []
+            data   = {
+                "last_active":    datetime.now().isoformat(),
+                "studied_topics": topics,
+                "memory_count":   len(self.memory.get_all()),
+            }
+            SESSION_FILE.parent.mkdir(exist_ok=True)
+            SESSION_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[Brain] Session save: {e}")
+
+    def _on_research_complete(self, result: str):
+        self._save_session()
+        if self.chat_callback:
+            self.chat_callback(f"JARVIS: {result}")
+        if self.voice_callback:
+            self.voice_callback("Research complete, sir. Knowledge saved permanently.")
 
 
     def process(self, raw_text: str) -> str:
@@ -91,29 +206,76 @@ class JarvisBrain:
             return "I did not catch that, sir."
         lower = text.lower()
 
-
         # ── TIME & DATE ─────────────────────────
-        if any(x in lower for x in ["what time", "whats the time", "what's the time"]):
+        if any(x in lower for x in ["what time","whats the time","what's the time"]):
             return "The time is " + datetime.now().strftime("%H:%M") + ", sir."
 
-        if any(x in lower for x in ["what day", "what date", "what's today"]):
+        if any(x in lower for x in ["what day","what date","what's today","whats today"]):
             return "Today is " + datetime.now().strftime("%A, %d %B %Y") + ", sir."
 
+        # ── PC CONTROL ──────────────────────────
+        if self.pc:
+            if any(x in lower for x in ["lock my pc","lock the pc","lock computer","lock screen"]):
+                return self.pc.lock_pc()
+            if any(x in lower for x in ["sleep","put the pc to sleep"]):
+                return self.pc.sleep_pc()
+            if "shutdown" in lower or "shut down the pc" in lower:
+                return self.pc.shutdown_pc(60)
+            if "cancel shutdown" in lower:
+                return self.pc.cancel_shutdown()
+            if "restart" in lower and any(x in lower for x in ["pc","computer","system"]):
+                return self.pc.restart_pc(60)
+            if "minimize all" in lower or "show desktop" in lower:
+                return self.pc.show_desktop()
+            if lower.startswith("type "):
+                return self.pc.type_text(text[5:].strip())
+            if lower.startswith("open url ") or lower.startswith("go to "):
+                url = text.replace("open url","").replace("go to","").strip()
+                return self.pc.open_url(url)
+            if lower.startswith("google ") or lower.startswith("search google for "):
+                query = lower.replace("google","").replace("search google for","").strip()
+                return self.pc.google_search(query)
+            if "volume up" in lower:
+                return self.pc.volume_up()
+            if "volume down" in lower:
+                return self.pc.volume_down()
+            if any(x in lower for x in ["mute","silence the pc"]):
+                return self.pc.mute()
+            if "screenshot" in lower:
+                return self.pc.screenshot()
+            if any(x in lower for x in ["system info","pc status","how is the pc"]):
+                return self.pc.get_system_info()
+            if lower.startswith("find file "):
+                return self.pc.search_files(lower.replace("find file","").strip())
+            if any(x in lower for x in ["what's running","list processes","whats running"]):
+                return self.pc.list_processes()
+            if lower.startswith("run command "):
+                return self.pc.run_command(text[12:].strip())
+            if lower.startswith("copy to clipboard "):
+                return self.pc.set_clipboard(text[18:].strip())
+            if any(x in lower for x in ["what's in my clipboard","read clipboard"]):
+                content = self.pc.get_clipboard()
+                return f"Clipboard: {content[:200]}" if content else "Clipboard is empty, sir."
 
         # ── APPS ────────────────────────────────
         if "calculator" in lower:
-            os.system("calc"); return "Opening Calculator, sir."
+            subprocess.Popen("calc", shell=False, creationflags=0x08000000)
+            return "Opening Calculator, sir."
         if "notepad" in lower:
-            os.system("notepad"); return "Opening Notepad, sir."
-        if "chrome" in lower and "open" in lower:
-            os.system("start chrome"); return "Opening Chrome, sir."
-        if "obsidian" in lower and "open" in lower:
-            os.system("start obsidian://open"); return "Opening Obsidian, sir."
-        if "spotify" in lower and "open" in lower:
-            os.system("start spotify"); return "Opening Spotify, sir."
-        if "file explorer" in lower or "explorer" in lower and "open" in lower:
-            os.system("explorer"); return "Opening File Explorer, sir."
-
+            subprocess.Popen("notepad", shell=False, creationflags=0x08000000)
+            return "Opening Notepad, sir."
+        if "chrome" in lower and any(x in lower for x in ["open","launch","start"]):
+            subprocess.Popen("start chrome", shell=True, creationflags=0x08000000)
+            return "Opening Chrome, sir."
+        if "obsidian" in lower and any(x in lower for x in ["open","launch","start"]):
+            subprocess.Popen("start obsidian://open", shell=True, creationflags=0x08000000)
+            return "Opening Obsidian, sir."
+        if "spotify" in lower and any(x in lower for x in ["open","launch","start"]):
+            subprocess.Popen("start spotify", shell=True, creationflags=0x08000000)
+            return "Opening Spotify, sir."
+        if "explorer" in lower and any(x in lower for x in ["open","launch","file"]):
+            subprocess.Popen("explorer", shell=False, creationflags=0x08000000)
+            return "Opening File Explorer, sir."
 
         # ── MEMORY ──────────────────────────────
         if lower.startswith("remember "):
@@ -121,19 +283,41 @@ class JarvisBrain:
             self.memory.remember(fact)
             if self.obsidian:
                 self.obsidian.remember(fact)
-            return "Understood, sir. I shall remember that."
+            self._save_session()
+            return "Understood, sir. I shall remember that permanently."
 
         if lower.startswith("forget "):
-            fact = text[7:].strip()
-            self.memory.forget(fact)
+            self.memory.forget(text[7:].strip())
             return "Consider it forgotten, sir."
 
-        if any(x in lower for x in ["show memories", "what do you remember", "show facts"]):
+        if any(x in lower for x in ["show memories","what do you remember","show facts","list memories"]):
             facts = self.memory.get_all()
-            if not facts:
-                return "My memory banks are currently empty, sir."
-            return "\n".join(facts)
+            return "\n".join(facts) if facts else "Memory banks are empty, sir."
 
+        # ── RESEARCH ────────────────────────────
+        if self.researcher:
+            if any(x in lower for x in ["what have you studied","list your knowledge",
+                                         "show knowledge","list topics","what topics do you know"]):
+                return self.researcher.list_topics()
+
+            if any(lower.startswith(x) for x in ["what do you know about",
+                                                    "tell me what you know about","recall "]):
+                topic = lower
+                for p in ["what do you know about","tell me what you know about","recall"]:
+                    topic = topic.replace(p,"").strip()
+                result = self.researcher.recall(topic)
+                if result:
+                    return result
+                return f"I have not studied '{topic}' yet, sir. Say 'study {topic}' to begin."
+
+            for trigger in ["study ","research ","learn everything about ",
+                            "learn about ","investigate ","deep dive into "]:
+                if lower.startswith(trigger):
+                    topic = text[len(trigger):].strip().strip("\"'")
+                    if topic:
+                        if self.researcher.active:
+                            return "I am already researching a topic, sir. Please wait."
+                        return self.researcher.study_async(topic, depth=12)
 
         # ── TASKS ───────────────────────────────
         if self.tasks:
@@ -143,77 +327,63 @@ class JarvisBrain:
                 if self.obsidian:
                     self.obsidian.add_task(task)
                 return result
-
-            if lower.startswith("complete task ") or lower.startswith("done with "):
-                task = text.replace("complete task", "").replace("done with", "").strip()
+            if any(lower.startswith(x) for x in ["complete task","done with","finish task"]):
+                task = lower.replace("complete task","").replace("done with","").replace("finish task","").strip()
                 return self.tasks.complete(task)
-
             if lower.startswith("delete task "):
-                task = text[12:].strip()
-                return self.tasks.delete(task)
-
-            if any(x in lower for x in ["show tasks", "my tasks", "what are my tasks", "list tasks"]):
+                return self.tasks.delete(text[12:].strip())
+            if any(x in lower for x in ["show tasks","my tasks","list tasks","what are my tasks"]):
                 return self.tasks.list_pending()
-
             if lower.startswith("remind me in "):
-                # "remind me in 30 minutes to call John"
                 try:
-                    parts   = text[13:].split(" ", 2)
-                    minutes = int(parts[0])
-                    message = parts[2] if len(parts) > 2 else "reminder"
-                    return self.tasks.remind_in(minutes, message)
+                    parts = text[13:].split(" ",2)
+                    return self.tasks.remind_in(int(parts[0]), parts[2] if len(parts)>2 else "reminder")
                 except Exception:
                     return "Please say 'remind me in X minutes to do something', sir."
-
             if lower.startswith("remind me at "):
-                # "remind me at 14:30 to take medication"
                 try:
-                    parts   = text[13:].split(" ", 2)
-                    time_s  = parts[0]
-                    message = parts[2] if len(parts) > 2 else "reminder"
-                    return self.tasks.remind_at(time_s, message)
+                    parts = text[13:].split(" ",2)
+                    return self.tasks.remind_at(parts[0], parts[2] if len(parts)>2 else "reminder")
                 except Exception:
                     return "Please say 'remind me at HH:MM to do something', sir."
 
-
-        # ── OBSIDIAN ────────────────────────────
-        if any(x in lower for x in ["vault status", "obsidian status"]):
+        # ── OBSIDIAN STATUS ─────────────────────
+        if any(x in lower for x in ["vault status","obsidian status"]):
             if self.obsidian:
                 s = self.obsidian.status()
-                return (
-                    f"Vault connected. "
-                    f"Memory files: {s.get('memory_files', 0)}. "
-                    f"Active tasks: {s.get('active_tasks', 0)}."
-                )
+                return (f"Vault connected. Memory files: {s.get('memory_files',0)}. "
+                        f"Active tasks: {s.get('active_tasks',0)}.")
             return "Obsidian is not connected, sir."
 
-
-        # ── WEB SEARCH ──────────────────────────
+        # ── WEB ─────────────────────────────────
         if "weather" in lower:
             if self.web:
-                result = self.web.weather("Benoni, South Africa")
-                return f"Current weather in Benoni: {result}"
-            return "Web search not available, sir."
+                return "Weather in Benoni: " + self.web.weather("Benoni, South Africa")
+            return "Web not available, sir."
 
-        if any(x in lower for x in ["latest news", "news today", "what's happening", "whats happening"]):
+        if any(x in lower for x in ["latest news","news today","what's happening","whats happening"]):
             if self.web:
-                topic = lower.replace("latest news", "").replace("news today", "").replace("what's happening", "").replace("whats happening", "").strip()
+                topic = lower
+                for p in ["latest news","news today","what's happening","whats happening"]:
+                    topic = topic.replace(p,"").strip()
                 return self.web.news(topic)
-            return "Web search not available, sir."
 
-        if any(x in lower for x in ["search for", "look up", "search the web", "find information about", "who is", "when did", "what is"]):
+        if any(x in lower for x in ["search for","look up","who is","tell me about"]):
+            if self.researcher:
+                topic = lower
+                for p in ["search for","look up","tell me about","who is"]:
+                    topic = topic.replace(p,"").strip()
+                recall = self.researcher.recall(topic)
+                if recall:
+                    return recall
             if self.web:
                 query = lower
-                for phrase in ["search for", "search the web for", "look up",
-                               "find information about", "tell me about",
-                               "what is", "who is", "when did"]:
-                    query = query.replace(phrase, "").strip()
+                for p in ["search for","look up","tell me about","who is"]:
+                    query = query.replace(p,"").strip()
                 return self.web.search(query)
-            return "Web search not available, sir."
-
 
         # ── CLAUDE ──────────────────────────────
-        self.conversation_history.append({"role": "user", "content": text})
+        self.conversation_history.append({"role":"user","content":text})
         if len(self.conversation_history) > 8:
             self.conversation_history = self.conversation_history[-8:]
 
@@ -226,26 +396,23 @@ class JarvisBrain:
             )
             reply = ""
             for block in response.content:
-                if hasattr(block, "text"):
+                if hasattr(block,"text"):
                     reply += block.text
             reply = self.clean(reply)
-
-            self.conversation_history.append({"role": "assistant", "content": reply})
-
+            self.conversation_history.append({"role":"assistant","content":reply})
             if self.obsidian:
-                self.obsidian.log_conversation(text, reply)
-
+                self.obsidian.log_conversation(text,reply)
             return reply
-
         except Exception as e:
             return f"System error: {e}"
 
 
     def system_prompt(self) -> str:
-        facts       = self.memory.get_all()
-        memory_text = "\n".join(f"- {f}" for f in facts)
-        now         = datetime.now().strftime("%A, %d %B %Y at %H:%M")
-        task_count  = self.tasks.count_pending() if self.tasks else 0
+        facts      = self.memory.get_all()
+        mem_text   = "\n".join(f"- {f}" for f in facts)
+        now        = datetime.now().strftime("%A, %d %B %Y at %H:%M")
+        task_count = self.tasks.count_pending() if self.tasks else 0
+        know_count = len(self.researcher.knowledge) if self.researcher else 0
 
         return (
             "You are JARVIS, a highly intelligent AI assistant "
@@ -254,12 +421,13 @@ class JarvisBrain:
             "Avoid markdown symbols. "
             "Keep all responses under 2 sentences. Be concise and direct. "
             f"The current date and time is {now}. "
-            f"Shaun currently has {task_count} pending tasks. "
-            "You always know the time and date. "
-            "You refer to Shaun as 'sir' occasionally.\n\n"
-            "Known facts about Shaun:\n" + memory_text
+            f"Shaun has {task_count} pending tasks. "
+            f"I have {know_count} topics in my permanent knowledge base. "
+            "You have persistent memory, live internet access, and can control Shaun's PC. "
+            "Never say you cannot retain memory or access the internet. "
+            "You refer to Shaun as sir occasionally.\n\n"
+            "Known facts about Shaun:\n" + mem_text
         )
-
 
     def clean(self, text: str) -> str:
         text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)

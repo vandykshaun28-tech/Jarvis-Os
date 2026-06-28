@@ -3,6 +3,9 @@ import queue
 import subprocess
 
 
+CREATE_NO_WINDOW = 0x08000000
+
+
 class JarvisVoice:
 
     def __init__(self):
@@ -27,7 +30,6 @@ class JarvisVoice:
             self.queue.task_done()
 
     def _say(self, text: str):
-        # Windows SAPI via PowerShell — instant, no network needed
         safe = text.replace("'", "''").replace('"', '')
         script = (
             "Add-Type -AssemblyName System.Speech;"
@@ -38,7 +40,8 @@ class JarvisVoice:
             f"$s.Speak('{safe}');"
         )
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
             timeout=30,
-            capture_output=True
+            capture_output=True,
+            creationflags=CREATE_NO_WINDOW
         )

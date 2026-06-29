@@ -79,6 +79,14 @@ except Exception as e:
 
 # ── PCControl ───────────────────────────────────
 try:
+    _ra_mod      = _load("_ra", os.path.join(_brain_dir, "research_agent.py"))
+    ResearchAgent = _ra_mod.ResearchAgent
+    RA_OK        = True
+except Exception as e:
+    print(f"[Brain] Research Agent: {e}")
+    RA_OK        = False
+
+try:
     _pc_mod      = _load("_pc", os.path.join(_brain_dir, "pc_control.py"))
     PCControl    = _pc_mod.PCControl
     PC_OK        = True
@@ -149,6 +157,19 @@ class JarvisBrain:
                 )
             except Exception as e:
                 print(f"Researcher error: {e}")
+
+        # Research Agent — background queue
+        self.research_agent = None
+        if RA_OK and self.researcher:
+            try:
+                self.research_agent = ResearchAgent(
+                    researcher=self.researcher,
+                    on_update=chat_callback,
+                    on_complete=self._on_research_complete
+                )
+                print("[Brain] Research agent online.")
+            except Exception as e:
+                print(f"Research agent error: {e}")
 
         # Agent
         self.agent = None
@@ -293,6 +314,54 @@ class JarvisBrain:
         if any(x in lower for x in ["show memories","what do you remember","show facts","list memories"]):
             facts = self.memory.get_all()
             return "\n".join(facts) if facts else "Memory banks are empty, sir."
+
+        # ── RESEARCH AGENT ──────────────────────
+        if self.research_agent:
+
+            # Queue multiple topics
+            if any(lower.startswith(x) for x in [
+                "research agent study:",
+                "research agent study ",
+                "queue research:",
+                "queue topics:",
+                "study queue:",
+                "background study:",
+                "background research:",
+            ]):
+                for prefix in ["research agent study:","research agent study ",
+                               "queue research:","queue topics:",
+                               "study queue:","background study:","background research:"]:
+                    if lower.startswith(prefix):
+                        topics_str = text[len(prefix):].strip()
+                        break
+                # Split by comma or "and"
+                import re as _re
+                topics = _re.split(r",|\band\b", topics_str)
+                topics = [t.strip() for t in topics if t.strip()]
+                if topics:
+                    return self.research_agent.add_topics(topics)
+                return "Please provide topics to study, sir."
+
+            if any(x in lower for x in ["research agent status","research queue status","agent status"]):
+                return self.research_agent.status()
+
+            if any(x in lower for x in ["research agent stop","stop research agent","stop researching"]):
+                self.research_agent.stop()
+                return "Research agent stopping after current topic, sir."
+
+            if any(x in lower for x in ["research agent pause","pause research"]):
+                self.research_agent.pause()
+                return "Research agent paused, sir."
+
+            if any(x in lower for x in ["research agent resume","resume research"]):
+                self.research_agent.resume()
+                return "Research agent resumed, sir."
+
+            if any(x in lower for x in ["show research queue","research queue","what's in the queue","whats in the queue"]):
+                return self.research_agent.get_queue()
+
+            if any(x in lower for x in ["clear research queue","clear queue"]):
+                return self.research_agent.clear_queue()
 
         # ── RESEARCH ────────────────────────────
         if self.researcher:

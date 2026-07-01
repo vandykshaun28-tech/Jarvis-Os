@@ -1,15 +1,21 @@
 from PySide6.QtWidgets import (
+    QMainWindow,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QLabel,
-    QFrame
+    QStackedWidget,
 )
 
-from PySide6.QtCore import Qt
 from ui.components.header import Header
+from ui.components.sidebar import Sidebar
+from ui.components.console import Console
+from ui.components.footer import Footer
 
-class MainWindow(QWidget):
+# Pages
+from ui.pages.dashboard import DashboardPage
+
+
+class MainWindow(QMainWindow):
 
     def __init__(self):
 
@@ -23,143 +29,72 @@ class MainWindow(QWidget):
 
     def build_ui(self):
 
+        central = QWidget()
+
+        self.setCentralWidget(central)
+
         root = QVBoxLayout()
 
-        root.setContentsMargins(
-            8,
-            8,
-            8,
-            8
-        )
+        root.setContentsMargins(8, 8, 8, 8)
 
         root.setSpacing(8)
 
-        # =====================
+        central.setLayout(root)
+
+        # ===================================
         # Header
-        # =====================
+        # ===================================
 
         self.header = Header()
 
-                
-        root.addWidget(
-            self.header
-        )
+        root.addWidget(self.header)
 
-        # =====================
-        # Middle Layout
-        # =====================
+        # ===================================
+        # Main Body
+        # ===================================
 
-        middle = QHBoxLayout()
+        body = QHBoxLayout()
 
-        middle.setSpacing(8)
+        body.setSpacing(8)
+
+        root.addLayout(body, 1)
 
         # Sidebar
 
-        self.sidebar = QFrame()
+        self.sidebar = Sidebar()
 
-        self.sidebar.setFixedWidth(
-            250
-        )
+        body.addWidget(self.sidebar)
 
-        self.sidebar.setObjectName(
-            "sidebar"
-        )
+        # ===================================
+        # Workspace
+        # ===================================
 
-        # Content
+        self.workspace = QStackedWidget()
 
-        self.content = QFrame()
+        body.addWidget(self.workspace, 1)
 
-        self.content.setObjectName(
-            "content"
-        )
+        # Dashboard Page
 
+        self.dashboard = DashboardPage()
+
+        self.workspace.addWidget(self.dashboard)
+
+        # Show Dashboard first
+
+        self.workspace.setCurrentWidget(self.dashboard)
+
+        # ===================================
         # Console
+        # ===================================
 
-        self.console = QFrame()
+        self.console = Console()
 
-        self.console.setFixedWidth(
-            360
-        )
+        body.addWidget(self.console)
 
-        self.console.setObjectName(
-            "console"
-        )
-
-        middle.addWidget(
-            self.sidebar
-        )
-
-        middle.addWidget(
-            self.content,
-            1
-        )
-
-        middle.addWidget(
-            self.console
-        )
-
-        root.addLayout(
-            middle
-        )
-
-        # =====================
+        # ===================================
         # Footer
-        # =====================
+        # ===================================
 
-        self.footer = QFrame()
+        self.footer = Footer()
 
-        self.footer.setFixedHeight(
-            32
-        )
-
-        self.footer.setObjectName(
-            "footer"
-        )
-
-        root.addWidget(
-            self.footer
-        )
-
-        self.setStyleSheet(
-            """
-            QWidget{
-                background:#05080d;
-                color:#00d9ff;
-                font-family:Segoe UI;
-            }
-
-            #header{
-                background:#08111b;
-                border:1px solid #10344d;
-                border-radius:8px;
-            }
-
-            #sidebar{
-                background:#08111b;
-                border:1px solid #10344d;
-                border-radius:8px;
-            }
-
-            #content{
-                background:#08111b;
-                border:1px solid #10344d;
-                border-radius:8px;
-            }
-
-            #console{
-                background:#08111b;
-                border:1px solid #10344d;
-                border-radius:8px;
-            }
-
-            #footer{
-                background:#08111b;
-                border:1px solid #10344d;
-                border-radius:8px;
-            }
-            """
-        )
-
-        self.setLayout(
-            root
-        )
+        root.addWidget(self.footer)

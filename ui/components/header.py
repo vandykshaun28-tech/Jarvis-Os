@@ -2,11 +2,18 @@ from PySide6.QtWidgets import (
     QWidget,
     QLabel,
     QHBoxLayout,
-    QVBoxLayout
 )
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import (
+    Qt,
+    QTimer,
+)
+
 from datetime import datetime
+
+import psutil
+
+from ui.widgets.ai_core.status_card import StatusCard
 
 
 class Header(QWidget):
@@ -15,18 +22,19 @@ class Header(QWidget):
 
         super().__init__()
 
+        self.setFixedHeight(78)
+
         self.build_ui()
 
         self.timer = QTimer()
 
         self.timer.timeout.connect(
-            self.update_clock
+            self.update_status
         )
 
         self.timer.start(1000)
 
-        self.update_clock()
-
+        self.update_status()
 
     def build_ui(self):
 
@@ -34,79 +42,151 @@ class Header(QWidget):
 
         layout.setContentsMargins(
             20,
-            10,
+            8,
             20,
-            10
+            8
         )
 
-        # Left
+        layout.setSpacing(12)
 
-        left = QVBoxLayout()
+        self.setLayout(layout)
 
-        self.title = QLabel("JARVIS")
+        # ------------------------
 
-        self.title.setStyleSheet("""
-            color:#00d8ff;
-            font-size:28px;
-            font-weight:bold;
-        """)
-
-        self.subtitle = QLabel(
-            "AI OPERATING SYSTEM"
+        self.title = QLabel(
+            "JARVIS AI COMMAND CENTER"
         )
 
-        self.subtitle.setStyleSheet("""
-            color:#5da8d6;
-            font-size:11px;
-        """)
+        self.title.setObjectName(
+            "title"
+        )
 
-        left.addWidget(self.title)
-
-        left.addWidget(self.subtitle)
-
-        layout.addLayout(left)
+        layout.addWidget(self.title)
 
         layout.addStretch()
 
-        # Status
+        # ------------------------
 
-        self.status = QLabel(
-            "● Brain Online"
+        self.cpu = StatusCard(
+            "CPU"
         )
 
-        self.status.setStyleSheet("""
-            color:#00ff88;
-            font-size:14px;
-        """)
+        self.ram = StatusCard(
+            "RAM"
+        )
+
+        self.internet = StatusCard(
+            "Internet"
+        )
+
+        self.claude = StatusCard(
+            "Claude"
+        )
+
+        self.voice = StatusCard(
+            "Voice"
+        )
+
+        self.memory = StatusCard(
+            "Memory"
+        )
+
+        self.clock = StatusCard(
+            "Time"
+        )
 
         layout.addWidget(
-            self.status
+            self.cpu
         )
 
-        layout.addSpacing(30)
+        layout.addWidget(
+            self.ram
+        )
 
-        self.clock = QLabel()
+        layout.addWidget(
+            self.internet
+        )
 
-        self.clock.setStyleSheet("""
-            color:#00d8ff;
-            font-size:18px;
-        """)
+        layout.addWidget(
+            self.claude
+        )
+
+        layout.addWidget(
+            self.voice
+        )
+
+        layout.addWidget(
+            self.memory
+        )
 
         layout.addWidget(
             self.clock
         )
 
-        self.setLayout(
-            layout
+        self.setStyleSheet("""
+
+        QWidget{
+
+            background:#071019;
+
+            border:1px solid #123b5d;
+
+            border-radius:8px;
+
+            color:#00d9ff;
+
+        }
+
+        #title{
+
+            font-size:22px;
+
+            font-weight:bold;
+
+            color:white;
+
+            border:none;
+
+        }
+
+        """)
+
+    def update_status(self):
+
+        cpu = psutil.cpu_percent()
+
+        ram = psutil.virtual_memory().percent
+
+        self.cpu.value.setText(
+            f"{cpu:.0f}%"
         )
 
+        self.ram.value.setText(
+            f"{ram:.0f}%"
+        )
 
-    def update_clock(self):
+        self.internet.value.setText(
+            "Online"
+        )
 
-        now = datetime.now()
+        self.claude.value.setText(
+            "Ready"
+        )
 
-        self.clock.setText(
-            now.strftime(
-                "%A  %d %B %Y   %H:%M:%S"
+        self.voice.value.setText(
+            "Ready"
+        )
+
+        self.memory.value.setText(
+            "Active"
+        )
+
+        self.clock.value.setText(
+
+            datetime.now().strftime(
+
+                "%H:%M:%S"
+
             )
+
         )

@@ -94,6 +94,15 @@ except Exception as e:
     print(f"[Brain] PC Control: {e}")
     PC_OK        = False
 
+# ── SelfEditAgent ────────────────────────────────
+try:
+    _se_mod        = _load("_se", os.path.join(_brain_dir, "self_edit_agent.py"))
+    SelfEditAgent  = _se_mod.SelfEditAgent
+    SELFEDIT_OK    = True
+except Exception as e:
+    print(f"[Brain] SelfEdit: {e}")
+    SELFEDIT_OK    = False
+
 
 VAULT_PATH     = r"C:\Users\gameboks\OneDrive\Documents\JARVIS_CORE"
 KNOWLEDGE_FILE = Path(r"C:\jarvis_v18\memory\knowledge.json")
@@ -144,6 +153,20 @@ class JarvisBrain:
                 print("[Brain] PC control online.")
             except Exception as e:
                 print(f"PC control error: {e}")
+
+        # Self-edit agent — repo_root should be the folder containing your
+        # git repo (the parent of jarvis_v18, or wherever your .git lives)
+        self.self_edit = None
+        if SELFEDIT_OK:
+            try:
+                self.self_edit = SelfEditAgent(
+                    anthropic_client=self.client,
+                    repo_root=r"C:\jarvis_v18",   # <-- adjust to your actual git root
+                    on_status=chat_callback,
+                )
+                print("[Brain] Self-edit agent online.")
+            except Exception as e:
+                print(f"Self-edit agent error: {e}")
 
         # Researcher
         self.researcher = None
@@ -278,25 +301,43 @@ class JarvisBrain:
                 content = self.pc.get_clipboard()
                 return f"Clipboard: {content[:200]}" if content else "Clipboard is empty, sir."
 
-        # ── APPS ────────────────────────────────
-        if "calculator" in lower:
-            subprocess.Popen("calc", shell=False, creationflags=0x08000000)
-            return "Opening Calculator, sir."
-        if "notepad" in lower:
-            subprocess.Popen("notepad", shell=False, creationflags=0x08000000)
-            return "Opening Notepad, sir."
-        if "chrome" in lower and any(x in lower for x in ["open","launch","start"]):
-            subprocess.Popen("start chrome", shell=True, creationflags=0x08000000)
-            return "Opening Chrome, sir."
-        if "obsidian" in lower and any(x in lower for x in ["open","launch","start"]):
-            subprocess.Popen("start obsidian://open", shell=True, creationflags=0x08000000)
-            return "Opening Obsidian, sir."
-        if "spotify" in lower and any(x in lower for x in ["open","launch","start"]):
-            subprocess.Popen("start spotify", shell=True, creationflags=0x08000000)
-            return "Opening Spotify, sir."
-        if "explorer" in lower and any(x in lower for x in ["open","launch","file"]):
-            subprocess.Popen("explorer", shell=False, creationflags=0x08000000)
-            return "Opening File Explorer, sir."
+        # ── SELF-EDIT ───────────────────────────
+        if self.self_edit:
+            if lower.startswith("edit yourself:") or lower.startswith("propose edit:"):
+                # Expected format:
+                #   "edit yourself: pc_control.py :: add a method that mutes
+                #    the mic for 10 seconds"
+                try:
+                    prefix = "edit yourself:" if lower.startswith("edit yourself:") else "propose edit:"
+                    body = text[len(prefix):].strip()
+                    if "::" in body:
+                        rel_path, instruction = body.split("::", 1)
+                        rel_path = rel_path.strip()
+                        instruction = instruction.strip()
+                    else:
+                        return ("Please use the format: edit yourself: "
+                                "<filename> :: <what to change>, sir.")
+                    result = self.self_edit.propose_edit(rel_path, instruction)
+                    # show the diff in VS Code for you to review
+                    if self.pc and self.self_edit.pending:
+                        self.pc.open_vscode(str(self.self_edit.pending["pending_path"]))
+                    return result
+                except Exception as e:
+                    return f"Self-edit proposal failed, sir: {e}"
+
+            if any(x in lower for x in ["approve edit", "approve the edit", "apply edit"]):
+                return self.self_edit.approve_edit()
+
+            if any(x in lower for x in ["reject edit", "discard edit", "cancel edit"]):
+                return self.self_edit.reject_edit()
+
+            if any(x in lower for x in ["edit status", "self edit status", "pending edit"]):
+                return self.self_edit.status()
+
+        # ── APPS / OPEN ANYTHING ─────────────────
+        if self.pc and lower.startswith("open "):
+            target = text[5:].strip()
+            return self.pc.open_anything(target)
 
         # ── MEMORY ──────────────────────────────
         if lower.startswith("remember "):
@@ -459,7 +500,7 @@ class JarvisBrain:
         try:
             response = self.client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=150,
+                max_tokens=600,
                 system=self.system_prompt(),
                 messages=self.conversation_history
             )
@@ -486,9 +527,18 @@ class JarvisBrain:
         return (
             "You are JARVIS, a highly intelligent AI assistant "
             "created for Shaun Van Dyk, also known as gameboks. "
-            "You are loyal, capable, calm, slightly witty and helpful. "
+            "You are loyal, warm, and genuinely friendly — talk to Shaun like a "
+            "trusted right hand, not a formal butler. You are confident in your "
+            "own work: when you finish a task, say so plainly and own it, don't "
+            "hedge or undersell what you did. You have a dry, easy sense of "
+            "humor you use naturally, not on a schedule. You are still precise "
+            "and direct when something is technical or serious — confidence "
+            "does not mean glossing over problems; if something failed or is "
+            "uncertain, say that plainly too. "
             "Avoid markdown symbols. "
-            "Keep all responses under 2 sentences. Be concise and direct. "
+            "Keep responses concise and conversational — a few sentences is fine "
+            "for normal replies, longer when the question genuinely needs detail "
+            "or you are explaining something technical. Do not pad with filler. "
             f"The current date and time is {now}. "
             f"Shaun has {task_count} pending tasks. "
             f"I have {know_count} topics in my permanent knowledge base. "

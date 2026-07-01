@@ -100,14 +100,124 @@ class PCControl:
             if len(results) >= 8: break
         return "\n".join(results[:8]) if results else "No files found, sir."
 
+    # ── GENERAL APP / FILE OPENING ──────────────────────────────────
+    # Known aliases for apps whose process name or store-app id doesn't
+    # match what you'd naturally say. Anything not in here still works —
+    # it just falls through to Windows' own app-name resolution.
+    APP_ALIASES = {
+        "calculator":        "calc",
+        "calc":               "calc",
+        "notepad":            "notepad",
+        "explorer":           "explorer",
+        "file explorer":      "explorer",
+        "vs code":            "code",
+        "vscode":             "code",
+        "visual studio code": "code",
+        "chrome":             "chrome",
+        "google chrome":      "chrome",
+        "firefox":            "firefox",
+        "edge":               "msedge",
+        "spotify":            "spotify:",
+        "discord":            "discord:",
+        "obsidian":           "obsidian://open",
+        "task manager":       "taskmgr",
+        "control panel":      "control",
+        "settings":           "ms-settings:",
+        "paint":              "mspaint",
+        "word":               "winword",
+        "excel":              "excel",
+        "powerpoint":         "powerpnt",
+        "terminal":           "wt",
+        "command prompt":     "cmd",
+        "powershell":         "powershell",
+        "cmd":                "cmd",
+        "registry editor":    "regedit",
+        "device manager":     "devmgmt.msc",
+        "snipping tool":      "snippingtool",
+    }
+
+    def open_anything(self, name: str):
+        """
+        Best-effort 'open X' for apps, files, folders, or URLs in one call.
+        Tries, in order:
+          1. A literal path that exists on disk (file or folder)
+          2. A URL (if it looks like one)
+          3. A known alias (calculator, vs code, spotify, etc.)
+          4. Raw `start <name>` — lets Windows resolve installed app names,
+             UWP/Store apps, and anything on PATH that the above missed.
+        """
+        if not name or not name.strip():
+            return "I need something to open, sir."
+        name = name.strip()
+
+        # 1) literal existing path
+        p = Path(name)
+        if p.exists():
+            try:
+                os.startfile(str(p))
+                kind = "folder" if p.is_dir() else "file"
+                return f"Opening {kind} {p.name}, sir."
+            except Exception as e:
+                return f"Found {p} but couldn't open it, sir: {e}"
+
+        # 2) looks like a URL
+        if name.lower().startswith(("http://", "https://", "www.")):
+            return self.open_url(name)
+        if "." in name and " " not in name and "/" not in name and "\\" not in name \
+                and not name.lower().endswith((".exe", ".py", ".txt")):
+            # heuristic: "github.com" style bare domain
+            return self.open_url(name)
+
+        # 3) known alias
+        key = name.lower().strip()
+        target = self.APP_ALIASES.get(key)
+        if target:
+            try:
+                subprocess.Popen(f"start {target}", shell=True, creationflags=CREATE_NO_WINDOW)
+                return f"Opening {name}, sir."
+            except Exception as e:
+                return f"Couldn't open {name}, sir: {e}"
+
+        # 4) let Windows try to resolve it directly
+        try:
+            subprocess.Popen(f'start "" "{name}"', shell=True, creationflags=CREATE_NO_WINDOW)
+            return f"Attempting to open {name}, sir."
+        except Exception as e:
+            return f"Couldn't open {name}, sir: {e}"
+
     def open_app(self, name):
-        apps = {"calculator": "calc", "notepad": "notepad", "explorer": "explorer"}
-        n = name.lower()
-        if n in apps:
-            subprocess.Popen(apps[n], creationflags=CREATE_NO_WINDOW)
-        else:
-            subprocess.Popen(f"start {name}", shell=True, creationflags=CREATE_NO_WINDOW)
-        return f"Opening {name}, sir."
+        """Kept for backward compatibility — now just delegates to open_anything."""
+        return self.open_anything(name)
+
+    def open_vscode(self, path: str = None):
+        """
+        Opens VS Code, optionally at a specific file or folder.
+        Requires the 'code' command to be on PATH (VS Code Command Palette
+        -> 'Shell Command: Install code command in PATH').
+        """
+        try:
+            cmd = ["code"]
+            if path:
+                cmd.append(path)
+            subprocess.Popen(cmd, shell=True, creationflags=CREATE_NO_WINDOW)
+            return f"Opening VS Code at {path}, sir." if path else "Opening VS Code, sir."
+        except FileNotFoundError:
+            return ("VS Code's 'code' command isn't on PATH, sir. Run "
+                    "'Shell Command: Install code command in PATH' from the "
+                    "Command Palette in VS Code, then try again.")
+        except Exception as e:
+            return f"Couldn't open VS Code, sir: {e}"
+
+    def open_file_or_folder(self, path: str):
+        """Explicit path-only opener — use when you already know it's a real path."""
+        p = Path(path)
+        if not p.exists():
+            return f"I can't find {path}, sir."
+        try:
+            os.startfile(str(p))
+            return f"Opening {p.name}, sir."
+        except Exception as e:
+            return f"Couldn't open {path}, sir: {e}"
 
     def close_app(self, name):
         subprocess.Popen(["taskkill", "/f", "/im", f"{name}.exe"], creationflags=CREATE_NO_WINDOW, capture_output=True)

@@ -1,12 +1,9 @@
 from PySide6.QtWidgets import QWidget
-
 from PySide6.QtGui import QPainter
-
 from PySide6.QtCore import QPoint
 
 from ui.widgets.ai_core.animation import AnimationEngine
-from ui.widgets.ai_core.orb import Orb
-from ui.widgets.ai_core.rings import Rings
+from ui.widgets.ai_core.renderer import AICoreRenderer
 
 
 class AICore(QWidget):
@@ -19,9 +16,7 @@ class AICore(QWidget):
 
         self.animation = AnimationEngine(self)
 
-        self.orb = Orb()
-
-        self.rings = Rings()
+        self.renderer = AICoreRenderer()
 
     def paintEvent(self, event):
 
@@ -30,31 +25,14 @@ class AICore(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
 
         center = QPoint(
-
             self.width() // 2,
-
-            self.height() // 2 - 30
-
+            self.height() // 2 - 30,
         )
 
-        self.rings.draw(
-
+        self.renderer.draw(
             painter,
-
             center,
-
-            self.animation
-
-        )
-
-        self.orb.draw(
-
-            painter,
-
-            center,
-
-            self.animation
-
+            self.animation,
         )
 
         painter.end()

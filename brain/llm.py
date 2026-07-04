@@ -28,6 +28,11 @@ class ProviderDead(Exception):
     """This provider can't serve us (credits/auth/unreachable) — try next."""
 
 
+class ToolCallGlitch(Exception):
+    """The model fumbled a tool-call generation (Groq 'failed_generation').
+    NOT a dead provider — retry, then fall back to a tool-less answer."""
+
+
 def _providers():
     """Provider table, built fresh so env-var changes are picked up."""
     return {
@@ -39,6 +44,12 @@ def _providers():
                       "model": config.GROQ_MODEL,
                       "key": os.environ.get("GROQ_API_KEY", ""),
                       "ok": bool(os.environ.get("GROQ_API_KEY"))},
+        "openrouter": {"kind": "openai", "vision": False,
+                       "base": "https://openrouter.ai/api/v1",
+                       "model": getattr(config, "OPENROUTER_MODEL",
+                                        "meta-llama/llama-3.3-70b-instruct:free"),
+                       "key": os.environ.get("OPENROUTER_API_KEY", ""),
+                       "ok": bool(os.environ.get("OPENROUTER_API_KEY"))},
         "gemini":    {"kind": "gemini-native", "vision": True,
                       "base": "https://generativelanguage.googleapis.com/v1beta",
                       "model": config.GEMINI_MODEL,
@@ -162,6 +173,10 @@ class UniversalLLM:
             if "error" in data:
                 err = data["error"]
                 msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                if ("failed_generation" in str(data) or
+                        "Failed to call a function" in msg or
+                        "tool_use_failed" in str(err)):
+                    raise ToolCallGlitch(msg[:160])
                 raise ProviderDead(f"API error: {msg[:160]}")
             try:
                 return data["choices"][0]
@@ -271,8 +286,10 @@ class UniversalLLM:
                          if prov["ok"] else
                          "NO KEY — env var GEMINI_API_KEY not visible to me")
             else:
+                envname = "GROQ_API_KEY" if name == "groq" else "OPENROUTER_API_KEY"
                 state = "key found" if prov["ok"] else \
-                    "NO KEY — env var GROQ_API_KEY not visible to me"
+                    f"NO KEY — {envname} not set (free key: " \
+                    + ("console.groq.com" if name == "groq" else "openrouter.ai") + ")"
             active = "  ← answered last" if self.active_provider == name else ""
             lines.append(f"  {name}: {prov['model']} — {state}{active}")
         lines.append(
@@ -333,8 +350,17 @@ class UniversalLLM:
         oa.append({"role": "user", "content": _blocks_to_openai(user_content)})
         oa_tools = _tools_to_openai(tools) if tools else None
 
-        for _ in range(max_rounds):
-            choice = self._openai_call(prov, oa, oa_tools, 1024)
+        glitches = 0
+        for _ in range(max_rounds + 2):
+            try:
+                choice = self._openai_call(prov, oa, oa_tools, 1024)
+            except ToolCallGlitch:
+                glitches += 1
+                if glitches >= 2:
+                    # model keeps fumbling tool syntax — answer in plain
+                    # words instead of failing the whole conversation
+                    oa_tools = None
+                continue
             msg = choice.get("message", {})
             calls = msg.get("tool_calls") or []
             if choice.get("finish_reason") == "tool_calls" or calls:

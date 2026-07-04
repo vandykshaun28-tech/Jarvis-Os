@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import keys as _keys
-    for _name in ("GROQ_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+    for _name in ("GROQ_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+                  "OPENROUTER_API_KEY"):
         _val = (getattr(_keys, _name, "") or "").strip()
         if _val and not os.environ.get(_name):
             os.environ[_name] = _val
@@ -53,8 +54,9 @@ CLAUDE_MODEL = "claude-sonnet-4-6"
 #   Gemini: aistudio.google.com/apikey → set env var GEMINI_API_KEY
 # Ollama = fully local & free forever (install from ollama.com), used
 # last if it's running.
-LLM_PROVIDER_ORDER = ["anthropic", "groq", "gemini", "ollama"]
-GROQ_MODEL   = "llama-3.3-70b-versatile"
+LLM_PROVIDER_ORDER = ["anthropic", "groq", "openrouter", "gemini", "ollama"]
+GROQ_MODEL       = "llama-3.3-70b-versatile"
+OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 GEMINI_MODEL = "gemini-2.0-flash"
 # tried in order if the first model name is rejected (Google renames often)
 GEMINI_MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-flash-latest",

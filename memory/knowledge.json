@@ -677,5 +677,22 @@
     ],
     "studied_at": "2026-07-04 10:43",
     "fact_count": 14
+  },
+  "OpenCV integration with GPT-4o Vision": {
+    "summary": "Jan 12, 2026 · Learn to use GPT-4o Vision for image analysis, OCR, and UI interpretation. Using OpenAI GPT-4 Vision Model with OpenCV Learn how to setup requests to OpenAI endpoints and use the gpt-4-vision-preview endpoint with the popular open-source computer vision library OpenCV May 16, 2024 · OpenAI’s new, flagship model, GPT-4o, has been out for a whole two days now! A big deal was made of its vision capabilities and I wanted to put that to the test, so what better way to do that than to u",
+    "facts": [
+      "Jan 12, 2026 · Learn to use GPT-4o Vision for image analysis, OCR, and UI interpretation.",
+      "Using OpenAI GPT-4 Vision Model with OpenCV Learn how to setup requests to OpenAI endpoints and use the gpt-4-vision-preview endpoint with the popular open-source computer vision library OpenCV May 16, 2024 · OpenAI’s new, flagship model, GPT-4o, has been out for a whole two days now!",
+      "A big deal was made of its vision capabilities and I wanted to put that to the test, so what better way to do that than to use OpenAI’s API to interface with the model?",
+      "Learn how to setup requests to OpenAI endpoints and use the gpt-4-vision-preview endpoint with the popular open-source computer vision library OpenCV Jan 12, 2026 · Learn to use GPT-4o Vision for image analysis, OCR, and UI interpretation."
+    ],
+    "sources": [
+      "https://getstream.io/blog/gpt-4o-vision-guide/",
+      "https://skyneticist.github.io/gpt-cv/",
+      "https://levelup.gitconnected.com/using-gpt-4os-vision-capabilities-fb0a89c7d1de",
+      "https://medium.com/coinmonks/using-openai-gpt-4-vision-model-with-opencv-af0d1e687f76"
+    ],
+    "studied_at": "2026-07-04 15:05",
+    "fact_count": 4
   }
 }

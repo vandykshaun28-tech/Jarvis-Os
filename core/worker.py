@@ -91,7 +91,16 @@ class Worker(QObject):
                 self.finished.emit("One moment, sir — still starting up.")
             return
         try:
-            reply = self.brain.process(text)
+            files = None
+            if text.startswith('{"__jarvis_files__"'):
+                import json
+                try:
+                    payload = json.loads(text)
+                    text  = payload.get("text", "")
+                    files = payload.get("files") or None
+                except Exception:
+                    pass
+            reply = self.brain.process(text, files=files)
             self.finished.emit(reply)
         except Exception as e:
             print(f"[Worker] Error: {e}")

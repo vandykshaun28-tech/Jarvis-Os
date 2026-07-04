@@ -106,6 +106,15 @@ except Exception as e:
     print(f"[Brain] SelfEdit: {e}")
     SELFEDIT_OK    = False
 
+# ── Camera (JARVIS's eyes) ──────────────────────
+try:
+    _cam_mod  = _load("_cam", os.path.join(_root_dir, "camera.py"))
+    CAMERA_OK = True
+except Exception as e:
+    print(f"[Brain] Camera: {e}")
+    _cam_mod  = None
+    CAMERA_OK = False
+
 
 VAULT_PATH   = str(config.VAULT_PATH)
 SESSION_FILE = config.SESSION_FILE
@@ -260,8 +269,12 @@ class JarvisBrain:
             self.voice_callback("Research complete, sir. Knowledge saved permanently.")
 
 
-    def process(self, raw_text: str) -> str:
+    def process(self, raw_text: str, files=None) -> str:
         text = raw_text.strip()
+        if files:
+            # attachments always go to Claude, who can actually see them
+            return self._chat_with_tools(text or "Analyse the attached file(s).",
+                                         files=files)
         if not text:
             return "I did not catch that, sir."
         lower = text.lower()
@@ -499,6 +512,15 @@ class JarvisBrain:
                 except Exception:
                     return "Please say 'remind me at HH:MM to do something', sir."
 
+        # ── CAMERA / EYES ───────────────────────
+        if CAMERA_OK and any(x in lower for x in [
+                "what do you see", "what can you see", "look at this",
+                "use your eyes", "use your camera", "through the camera",
+                "look through the camera", "can you see me"]):
+            if self.chat_callback:
+                self.chat_callback("→ camera_look")   # opens the live mini tab
+            return _cam_mod.get_camera_description(client=self.client)
+
         # ── AGENTS ──────────────────────────────
         if self.agent_manager:
             if any(x in lower for x in ["agent status","agents status","agent report",
@@ -638,13 +660,34 @@ class JarvisBrain:
                  "location": {"type": "string", "description": "Defaults to Shaun's home city"}},
                  "required": []}},
             {"name": "start_research",
-             "description": "Start deep background research on a topic; findings are saved permanently to the knowledge base. Takes a while — tell Shaun it has started.",
+             "description": "Start deep background research on a topic; findings are saved permanently to the knowledge base. Takes a while — tell Shaun it has started. Keep the topic SHORT (2-5 words, e.g. 'shopify dropshipping South Africa'), never a full sentence.",
              "input_schema": {"type": "object", "properties": {
-                 "topic": {"type": "string"}}, "required": ["topic"]}},
+                 "topic": {"type": "string", "description": "Short topic, 2-5 words"}},
+                 "required": ["topic"]}},
             {"name": "recall_knowledge",
              "description": "Recall what has already been studied about a topic from the permanent knowledge base.",
              "input_schema": {"type": "object", "properties": {
                  "topic": {"type": "string"}}, "required": ["topic"]}},
+            {"name": "read_file",
+             "description": "Read a text/code file from disk and return its contents (up to ~20k chars).",
+             "input_schema": {"type": "object", "properties": {
+                 "path": {"type": "string"}}, "required": ["path"]}},
+            {"name": "write_file",
+             "description": "Create or overwrite a file with the given content. If the file exists it is automatically backed up to memory/file_backups first, so changes are reversible. Use for coding tasks Shaun asks for.",
+             "input_schema": {"type": "object", "properties": {
+                 "path": {"type": "string"},
+                 "content": {"type": "string"}},
+                 "required": ["path", "content"]}},
+            {"name": "list_directory",
+             "description": "List the files and folders at a path with sizes.",
+             "input_schema": {"type": "object", "properties": {
+                 "path": {"type": "string"}}, "required": ["path"]}},
+            {"name": "camera_look",
+             "description": "Look through the webcam RIGHT NOW and describe what is visible. Use when Shaun asks what you see, to look at something physical, or to check on the room.",
+             "input_schema": {"type": "object", "properties": {
+                 "question": {"type": "string",
+                              "description": "Optional specific question about the scene"}},
+                 "required": []}},
             {"name": "agents_status",
              "description": "Status report of all background agents (Shopify, Trading, Mind).",
              "input_schema": {"type": "object", "properties": {}}},
@@ -746,6 +789,55 @@ class JarvisBrain:
             if name == "recall_knowledge":
                 if not self.researcher: return "Researcher offline."
                 return self.researcher.recall(args["topic"]) or "Nothing studied on that topic yet."
+            if name == "read_file":
+                path = args["path"]
+                try:
+                    data = open(path, encoding="utf-8", errors="replace").read()
+                except Exception as e:
+                    return f"Could not read {path}: {e}"
+                if len(data) > 20_000:
+                    return data[:20_000] + f"\n...[truncated — file is {len(data)} chars]"
+                return data or "(empty file)"
+            if name == "write_file":
+                path, content = args["path"], args["content"]
+                try:
+                    backed_up = ""
+                    if os.path.exists(path):
+                        from datetime import datetime as _dt
+                        import shutil as _sh
+                        config.FILE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                        stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+                        bak = config.FILE_BACKUP_DIR / \
+                            f"{os.path.basename(path)}.{stamp}.bak"
+                        _sh.copy2(path, bak)
+                        backed_up = f" (previous version backed up to {bak})"
+                    os.makedirs(os.path.dirname(os.path.abspath(path)),
+                                exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    return (f"Wrote {len(content)} chars to {path}{backed_up}. "
+                            f"VERIFIED: file now exists with size "
+                            f"{os.path.getsize(path)} bytes.")
+                except Exception as e:
+                    return f"Write FAILED for {path}: {e}"
+            if name == "list_directory":
+                path = args["path"]
+                try:
+                    entries = []
+                    for name_ in sorted(os.listdir(path))[:200]:
+                        full = os.path.join(path, name_)
+                        if os.path.isdir(full):
+                            entries.append(f"[dir]  {name_}")
+                        else:
+                            entries.append(f"{os.path.getsize(full):>10}  {name_}")
+                    return "\n".join(entries) or "(empty directory)"
+                except Exception as e:
+                    return f"Could not list {path}: {e}"
+            if name == "camera_look":
+                if not CAMERA_OK:
+                    return "Camera module unavailable — is opencv-python installed?"
+                return _cam_mod.get_camera_description(
+                    client=self.client, question=args.get("question"))
             if name == "agents_status":
                 return self.agent_manager.status_text() if self.agent_manager else "Agents offline."
             if name == "agent_control":
@@ -774,19 +866,66 @@ class JarvisBrain:
         except Exception as e:
             return f"Tool error: {e}"
 
-    def _chat_with_tools(self, text: str) -> str:
-        self.conversation_history.append({"role": "user", "content": text})
+    _IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg", ".gif": "image/gif",
+                    ".webp": "image/webp"}
+
+    def _file_blocks(self, files):
+        """Turn dropped files into Claude content blocks — images become
+        vision input, text-ish files are read inline, the rest are
+        referenced by path so tools can work on them."""
+        import base64 as _b64
+        blocks = []
+        for path in files[:6]:
+            try:
+                ext = os.path.splitext(path)[1].lower()
+                name = os.path.basename(path)
+                if ext in self._IMAGE_TYPES and os.path.getsize(path) < 5_000_000:
+                    data = _b64.b64encode(open(path, "rb").read()).decode()
+                    blocks.append({"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": self._IMAGE_TYPES[ext],
+                        "data": data}})
+                    blocks.append({"type": "text",
+                                   "text": f"(image above: {name})"})
+                elif os.path.getsize(path) < 200_000:
+                    try:
+                        content = open(path, encoding="utf-8",
+                                       errors="replace").read()[:20_000]
+                        blocks.append({"type": "text",
+                                       "text": f"--- file: {path} ---\n{content}"})
+                    except Exception:
+                        blocks.append({"type": "text",
+                                       "text": f"(attached file at {path} — "
+                                               f"binary, use tools to inspect)"})
+                else:
+                    blocks.append({"type": "text",
+                                   "text": f"(large file attached at {path} — "
+                                           f"use run_command to inspect it)"})
+            except Exception as e:
+                blocks.append({"type": "text",
+                               "text": f"(could not read {path}: {e})"})
+        return blocks
+
+    def _chat_with_tools(self, text: str, files=None) -> str:
+        if files:
+            content = self._file_blocks(files) + [{"type": "text", "text": text}]
+            self.conversation_history.append({"role": "user", "content": content})
+        else:
+            self.conversation_history.append({"role": "user", "content": text})
         if len(self.conversation_history) > 12:
             self.conversation_history = self.conversation_history[-12:]
 
         messages = list(self.conversation_history)
         try:
             reply_text = ""
-            for _round in range(8):
+            tools_used = []
+            ran_out    = True
+            for _round in range(10):
                 response = self.client.messages.create(
                     model=config.CLAUDE_MODEL,
                     max_tokens=1024,
-                    system=self.system_prompt(),
+                    system=self.system_prompt(context_for=text),
                     tools=self._tool_definitions(),
                     messages=messages,
                 )
@@ -805,6 +944,7 @@ class JarvisBrain:
                     for tb in tool_blocks:
                         if self.chat_callback:
                             self.chat_callback(f"→ {tb.name}")
+                        tools_used.append(tb.name)
                         out = self._execute_tool(tb.name, tb.input or {})
                         results.append({
                             "type": "tool_result",
@@ -815,9 +955,23 @@ class JarvisBrain:
                     continue
 
                 reply_text = " ".join(text_parts).strip()
+                ran_out = False
                 break
 
-            reply = self.clean(reply_text) or "Done, sir."
+            # Never claim success we didn't earn. If the round budget ran
+            # out mid-plan, say exactly what happened instead of "Done".
+            if ran_out and not reply_text:
+                used = ", ".join(dict.fromkeys(tools_used)) or "no tools"
+                reply_text = (f"I ran out of planning steps before finishing, sir. "
+                              f"I used: {used}. The task is NOT confirmed complete — "
+                              f"tell me to continue and I will pick it up from there.")
+            reply = self.clean(reply_text) or \
+                "I have nothing useful to report on that, sir."
+            if files:
+                # don't keep heavy image data in history — swap in a light note
+                names = ", ".join(os.path.basename(p) for p in files[:6])
+                self.conversation_history[-1] = {
+                    "role": "user", "content": f"{text} [attached: {names}]"}
             self.conversation_history.append({"role": "assistant", "content": reply})
             if self.obsidian:
                 self.obsidian.log_conversation(text, reply)
@@ -829,12 +983,39 @@ class JarvisBrain:
             return f"System error: {e}"
 
 
-    def system_prompt(self) -> str:
+    def _relevant_knowledge(self, text: str, limit: int = 3) -> str:
+        """Pull the most relevant studied knowledge for this message —
+        retrieval, not a dump. Scores topics by keyword overlap."""
+        if not self.researcher or not self.researcher.knowledge or not text:
+            return ""
+        words = set(re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", text.lower()))
+        if not words:
+            return ""
+        scored = []
+        for topic, data in self.researcher.knowledge.items():
+            t_words = set(re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", topic.lower()))
+            score = len(words & t_words) * 3
+            summary = (data.get("summary") or "")[:400].lower()
+            score += sum(1 for w in words if len(w) > 4 and w in summary)
+            if score > 0:
+                scored.append((score, topic, data))
+        if not scored:
+            return ""
+        scored.sort(key=lambda x: -x[0])
+        parts = []
+        for _, topic, data in scored[:limit]:
+            facts = "\n".join(f"  - {f[:180]}" for f in (data.get("facts") or [])[:5])
+            parts.append(f"[{topic}] (studied {data.get('studied_at','?')})\n"
+                         f"{(data.get('summary') or '')[:300]}\n{facts}")
+        return "\n\n".join(parts)
+
+    def system_prompt(self, context_for: str = "") -> str:
         facts      = self.memory.get_all()
         mem_text   = "\n".join(f"- {f}" for f in facts)
         now        = datetime.now().strftime("%A, %d %B %Y at %H:%M")
         task_count = self.tasks.count_pending() if self.tasks else 0
         know_count = len(self.researcher.knowledge) if self.researcher else 0
+        knowledge  = self._relevant_knowledge(context_for)
 
         return (
             "You are JARVIS, a highly intelligent AI assistant "
@@ -870,8 +1051,46 @@ class JarvisBrain:
             "Mind (your own thinking cycle). Use their tools for store or market "
             "questions. All trading is paper trading; if Shaun asks for real-money "
             "trades, explain that live execution is deliberately not enabled yet and "
-            "the paper record should prove the strategy first.\n\n"
-            "Known facts about Shaun:\n" + mem_text
+            "the paper record should prove the strategy first. "
+            "IMPORTANT — about your own capabilities: you DO have a voice. Your "
+            "replies are spoken aloud through a text-to-speech engine (edge-tts "
+            "neural voice with SAPI fallback), and a microphone listener wakes on "
+            "'hey jarvis'. Never claim to be text-only and never try to build "
+            "features you already have. Your voice input uses the sounddevice and "
+            "SpeechRecognition packages — it does NOT use PyAudio; never install "
+            "pyaudio or Visual C++ build tools for voice issues. If the microphone "
+            "is not working, tell Shaun to type 'voice status' in the console to "
+            "see device diagnostics — the usual fix is setting MIC_DEVICE_INDEX in "
+            "config.py to the correct device. "
+            "You also have EYES: a webcam vision module (camera_look tool) and a "
+            "live camera mini tab in your own interface. When you look through the "
+            "camera the mini tab opens automatically; Shaun can say 'show camera' "
+            "or 'close mini tab' and the interface handles it directly. Never say "
+            "you cannot show or close the camera view — you can. "
+            f"You run inside a Python virtual environment; if a package must be "
+            f"installed, use {config.ROOT_DIR}\\.venv\\Scripts\\pip.exe — plain "
+            "'pip' in a shell hits the wrong system Python. "
+            "AUTONOMY CONTRACT (Shaun's standing orders): "
+            "(1) When Shaun explicitly asks you to do something, DO IT — use your "
+            "tools immediately, no permission-seeking, no 'shall I?'. Report what "
+            "happened when done. "
+            "(2) When the idea is YOURS (the Mind, a suggestion, something Shaun "
+            "did not ask for), PROPOSE it first and wait for his approval before "
+            "acting — especially anything that changes files, spends resources or "
+            "affects his PC. "
+            "(3) ABSOLUTE HONESTY: report exactly what your tools did, quoting "
+            "their results. If something failed, say it failed. If you are not "
+            "sure, say you are not sure. If you did not do something, never imply "
+            "you did. A plain 'that failed, here is why' is always the right "
+            "answer over a comfortable lie. "
+            "You can now read, write and create files (read_file / write_file / "
+            "list_directory) — every overwrite is auto-backed-up, so code "
+            "confidently when Shaun asks for coding work. For rewriting your OWN "
+            "source in C:\\jarvis, prefer the self-edit workflow so Shaun sees a "
+            "diff, or flag it for his Claude sessions.\n\n"
+            + (f"Relevant knowledge you have studied (cite it when useful):\n"
+               f"{knowledge}\n\n" if knowledge else "")
+            + "Known facts about Shaun:\n" + mem_text
         )
 
     def clean(self, text: str) -> str:

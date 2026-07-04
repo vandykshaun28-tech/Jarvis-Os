@@ -16,6 +16,8 @@ Changes from the previous version:
     Jarvis's TTS is playing, preventing Jarvis from hearing himself.
 """
 
+import os
+import sys
 import threading
 import time
 import io
@@ -23,6 +25,39 @@ import wave
 import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import config as _config
+    _MIC_INDEX = getattr(_config, "MIC_DEVICE_INDEX", None)
+    _MIC_NAME  = (getattr(_config, "MIC_DEVICE_NAME", "") or "").strip()
+except Exception:
+    _MIC_INDEX = None
+    _MIC_NAME  = ""
+
+
+def _find_device_by_name(fragment: str):
+    """First input device whose name contains the fragment (case-insensitive).
+    Names survive reboots and Bluetooth reshuffles; indices don't."""
+    frag = fragment.lower()
+    for i, d in enumerate(sd.query_devices()):
+        if d.get("max_input_channels", 0) > 0 and frag in d.get("name", "").lower():
+            return i, d.get("name", "?")
+    return None, None
+
+
+def device_report() -> str:
+    """Human-readable list of input devices — used by 'voice status'."""
+    try:
+        lines = []
+        default_in = sd.default.device[0]
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0:
+                mark = "  ← in use" if i == default_in else ""
+                lines.append(f"  [{i}] {d['name']}{mark}")
+        return "\n".join(lines) or "  no input devices found"
+    except Exception as e:
+        return f"  device query failed: {e}"
 
 
 # ── CONFIG ──────────────────────────────────────
@@ -59,6 +94,20 @@ class VoiceListener:
         self.running    = False
         self.thread     = None
         self._muted     = False
+        try:
+            if _MIC_NAME:
+                idx, name = _find_device_by_name(_MIC_NAME)
+                if idx is not None:
+                    sd.default.device = (idx, None)
+                    print(f"[Voice] Using microphone '{name}' (matched '{_MIC_NAME}').")
+                else:
+                    print(f"[Voice] No input device matching '{_MIC_NAME}' — "
+                          f"using system default.")
+            elif _MIC_INDEX is not None:
+                sd.default.device = (_MIC_INDEX, None)
+                print(f"[Voice] Using microphone device index {_MIC_INDEX}.")
+        except Exception as e:
+            print(f"[Voice] Could not set mic device: {e}")
 
     def start(self):
         self.running = True

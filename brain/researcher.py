@@ -133,6 +133,16 @@ class Researcher:
 
     # ── CORE STUDY ──────────────────────────────
 
+    @staticmethod
+    def _keywords(topic: str):
+        """Meaningful search words from a topic, punctuation stripped."""
+        stop = {"the","a","an","and","or","to","of","for","in","on","how",
+                "what","why","is","are","i","you","me","my","your","vs",
+                "with","from","best","make","want","know","begin","start",
+                "some","real","how-to"}
+        words = re.findall(r"[a-zA-Z][a-zA-Z0-9'-]+", topic.lower())
+        return [w for w in words if w not in stop] or words
+
     def _study(self, topic: str, depth: int = 10):
 
         self._progress(f"Starting research on '{topic}'...")
@@ -144,12 +154,16 @@ class Researcher:
         all_text  = []
         sources   = []
 
-        # Phase 1 — Search multiple queries
+        # Phase 1 — Search multiple queries.
+        # Long conversational topics make terrible search queries, so we
+        # search with a short core built from the topic's keywords.
+        keywords = self._keywords(topic)
+        core     = " ".join(keywords[:5])
         queries = [
-            topic,
-            f"{topic} fundamentals overview",
-            f"{topic} key concepts principles",
-            f"{topic} applications examples",
+            core,
+            f"{core} guide fundamentals",
+            f"{core} key concepts tips",
+            f"{core} examples how it works",
         ]
 
         total_queries = len(queries)
@@ -178,15 +192,25 @@ class Researcher:
         combined  = " ".join(all_text)
         sentences = re.split(r'(?<=[.!?])\s+', combined)
 
-        topic_word = topic.lower().split()[0]
+        # A sentence counts as relevant if it mentions ANY topic keyword
+        # (punctuation-stripped) — the old check used the raw first word,
+        # so a topic like "Shopify: how to..." matched nothing at all.
+        kw = set(self._keywords(topic)[:8])
         good = []
         for s in sentences:
             s = s.strip()
+            s_low = s.lower()
             if (40 < len(s) < 300
-                    and topic_word in s.lower()
+                    and any(w in s_low for w in kw)
                     and not s.startswith("{")
                     and not s.startswith("[")):
                 good.append(s)
+        # fallback: if keyword filtering was too strict, keep the longest
+        # sentences rather than saving nothing
+        if not good:
+            good = sorted((x.strip() for x in sentences
+                           if 60 < len(x.strip()) < 300),
+                          key=len, reverse=True)[:25]
 
         # Deduplicate
         seen  = set()

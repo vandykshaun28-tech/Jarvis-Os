@@ -117,7 +117,7 @@ class Header(QWidget):
 
         QWidget{
 
-            background:#0a1420;
+            background:rgba(10,20,32,0.88);
 
             border:1px solid #12324a;
 

@@ -60,3 +60,25 @@ MIND_ENABLED           = True
 MIND_INTERVAL_MINUTES  = 30
 MIND_QUIET_START       = 22    # don't speak between these hours
 MIND_QUIET_END         = 6
+
+# ── Voice ───────────────────────────────────────
+# "neural": Microsoft Edge neural TTS (needs internet, sounds like the
+#           film JARVIS). "sapi": offline Windows voice. Neural falls
+#           back to SAPI automatically if the internet is down.
+VOICE_ENGINE = "neural"
+VOICE_NAME   = "en-GB-RyanNeural"   # try en-GB-ThomasNeural, en-US-GuyNeural
+VOICE_RATE   = "+4%"                # speaking speed tweak
+
+# Webcam for JARVIS's eyes (camera.py) — 0 = default camera
+CAMERA_INDEX = 0
+
+# Every file JARVIS overwrites gets backed up here first
+FILE_BACKUP_DIR = MEMORY_DIR / "file_backups"
+
+# Microphone. Windows reshuffles device NUMBERS whenever Bluetooth
+# reconnects, so prefer picking by NAME — any part of the device name,
+# case-insensitive. Examples: "FUNKI" for the headset, "Microphone Array"
+# for the laptop's built-in mics. Leave "" to use the system default.
+MIC_DEVICE_NAME  = ""
+# (legacy fallback — only used if MIC_DEVICE_NAME is empty)
+MIC_DEVICE_INDEX = None

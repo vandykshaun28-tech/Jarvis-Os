@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 
+# JARVIS runtime artifacts (never commit these)
+.venv/
+make_shortcut.vbs
+memory/last_camera.jpg
+memory/file_backups/
+
 # Virtual environments
 venv/
 .env
@@ -23,4 +29,3 @@ logs/
 # Windows
 Thumbs.db
 Desktop.ini
-.venv/

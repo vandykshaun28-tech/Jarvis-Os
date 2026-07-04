@@ -26,4 +26,6 @@ numpy
 sounddevice
 SpeechRecognition
 pyautogui
+edge-tts
+opencv-python
 # httpx is already pinned above — used by the Shopify and Trading agents

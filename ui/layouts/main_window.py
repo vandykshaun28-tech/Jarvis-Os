@@ -121,12 +121,14 @@ class MainWindow(QMainWindow):
             "trading":  trading_provider,
             "mind":     mind_provider,
             "listener": listen_provider,
+            "activity": lambda: self.controller.brain_activity(),
         })
 
         # Order matches the sidebar buttons exactly
         self.pages = [
             self.dashboard,                                       # Dashboard
-            AgentsPage(provider=agents_provider),                 # AI Agents
+            AgentsPage(provider=agents_provider,
+                       activity_provider=lambda: self.controller.brain_activity()),
             PlaceholderPage("Research",
                 "Say 'study <topic>' — knowledge is saved permanently."),
             PlaceholderPage("Internet",
@@ -225,6 +227,16 @@ class MainWindow(QMainWindow):
             self.dashboard.set_idle
         )
 
+        # Voice mute button ↔ controller (voice phrases sync the icon too)
+
+        self.console.muteClicked.connect(
+            self.controller.toggle_voice_mute
+        )
+
+        self.controller.voiceMuteChanged.connect(
+            self.console.set_mute_state
+        )
+
         # Camera mini tab: explicit commands + auto-open when he looks
 
         self.controller.cameraPanel.connect(self._toggle_camera_panel)
@@ -250,7 +262,11 @@ class MainWindow(QMainWindow):
     def _watch_for_camera_use(self, text):
 
         if str(text).strip() == "→ camera_look":
-            self._toggle_camera_panel(True)
+            # wait a beat so the BRAIN gets the webcam first for its
+            # snapshot — the live panel takes over a moment later
+            # (only one process may hold a webcam at a time)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2500, lambda: self._toggle_camera_panel(True))
 
     def _place_camera_panel(self):
 

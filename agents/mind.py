@@ -66,17 +66,21 @@ class Mind(BaseAgent):
 
     def tick(self):
         b = self.brain
-        if b is None or not getattr(b, "client", None):
+        if b is None or getattr(b, "llm", None) is None:
             return
         situation = self._situation()
         try:
-            response = b.client.messages.create(
-                model=config.CLAUDE_MODEL,
+            raw = b.llm.simple(
+                user=situation,
                 max_tokens=300,
                 system=(
                     "You are the inner voice of JARVIS, Shaun Van Dyk's AI. "
                     "You wake every so often, look at the situation, and decide "
-                    "if anything is genuinely worth acting on. Be very selective: "
+                    "if anything is genuinely worth acting on. You CANNOT build, "
+                    "code or 'work on' anything — your only powers are speaking "
+                    "one message and queueing one research topic. Never tell "
+                    "Shaun you are building or will build something. "
+                    "Be very selective: "
                     "speak only when useful (an overdue task at a sensible hour, "
                     "something notable from the Shopify or Trading agents, a "
                     "morning heads-up). Never repeat what was already said in a "
@@ -88,9 +92,7 @@ class Mind(BaseAgent):
                     '"research": "<topic>" or null, '
                     '"thought": "<one-line private note to your next cycle>"}'
                 ),
-                messages=[{"role": "user", "content": situation}],
             )
-            raw = "".join(getattr(blk, "text", "") for blk in response.content)
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             decision = json.loads(m.group(0)) if m else {}
         except Exception as e:

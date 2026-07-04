@@ -60,6 +60,7 @@ class JarvisController(QObject):
     voiceHeard         = Signal(str)   # a spoken command, for the console log
     brainReady         = Signal()
     cameraPanel        = Signal(bool)  # True = show the live mini tab
+    voiceMuteChanged   = Signal(bool)  # True = JARVIS's voice is muted
 
     # internal: safe hand-off from listener thread → Qt main thread
     _voiceCommand = Signal(str)
@@ -174,6 +175,15 @@ class JarvisController(QObject):
 
     # -----------------------------------------------------
 
+    def set_voice_muted(self, muted: bool):
+        if self.voice:
+            self.voice.set_muted(muted)
+        self.voiceMuteChanged.emit(bool(muted))
+
+    def toggle_voice_mute(self):
+        muted = not (self.voice.muted if self.voice else False)
+        self.set_voice_muted(muted)
+
     def voice_status(self) -> str:
         lines = []
         if self.voice:
@@ -207,15 +217,35 @@ class JarvisController(QObject):
         if not text:
             return
 
+        low = text.lower().strip(" .!?")
+
         # answered locally — the brain can't see the mic hardware
-        if text.lower() in ("voice status", "mic status", "microphone status"):
+        if low in ("voice status", "mic status", "microphone status"):
             self.responseReceived.emit(self.voice_status())
+            return
+
+        # voice control — stop him mid-sentence or mute/unmute entirely
+        if low in ("stop speaking", "stop talking", "be quiet", "quiet",
+                   "shut up", "silence", "enough"):
+            if self.voice:
+                self.voice.stop_now()
+            self.responseReceived.emit("Silenced, sir.")
+            return
+        if low in ("mute yourself", "mute your voice", "go mute",
+                   "voice off", "mute jarvis"):
+            self.set_voice_muted(True)
+            self.responseReceived.emit("Voice muted, sir. I'll keep it in "
+                                       "writing until you unmute me.")
+            return
+        if low in ("unmute yourself", "unmute your voice", "voice on",
+                   "you can speak", "speak again", "unmute jarvis"):
+            self.set_voice_muted(False)
+            self.responseReceived.emit("Voice restored, sir.")
             return
 
         # camera mini tab — UI-level commands, no brain round-trip.
         # Fuzzy on purpose: "close camera mini tab", "hide the vision
         # window", "shut the camera view" all count.
-        low = text.lower().strip(" .!?")
         cam_words = ("camera", "mini tab", "minitab", "vision", "cam view")
         if any(w in low for w in cam_words) and len(low.split()) <= 8:
             if any(w in low for w in ("close", "hide", "shut", "dismiss",
@@ -270,6 +300,18 @@ class JarvisController(QObject):
         b = getattr(self.worker, "brain", None)
         mgr = getattr(b, "agent_manager", None) if b else None
         return mgr.snapshot() if mgr else []
+
+    def brain_activity(self):
+        """(current_activity, recent entries) — the verified ledger."""
+        b = getattr(self.worker, "brain", None)
+        if b is None:
+            return "starting up", []
+        try:
+            with b._act_lock:
+                entries = list(b.activity)[:12]
+            return b.current_activity, entries
+        except Exception:
+            return "unknown", []
 
     def get_agent(self, name):
         b = getattr(self.worker, "brain", None)

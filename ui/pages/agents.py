@@ -60,11 +60,13 @@ class AgentCard(QFrame):
 
 
 class AgentsPage(QWidget):
-    """provider: () -> list of agent snapshot dicts"""
+    """provider: () -> list of agent snapshot dicts
+       activity_provider: () -> (current_activity, [ledger entries])"""
 
-    def __init__(self, provider=None):
+    def __init__(self, provider=None, activity_provider=None):
         super().__init__()
         self.provider = provider or (lambda: [])
+        self.activity_provider = activity_provider
         self.cards = {}
         self.setStyleSheet("background:transparent;")
 
@@ -76,6 +78,29 @@ class AgentsPage(QWidget):
             "color:#22d3ee;font-size:13px;font-weight:700;"
             "letter-spacing:3px;border:none;")
         root.addWidget(title)
+
+        # verified activity ledger — what JARVIS is ACTUALLY doing
+        self.act_card = QFrame()
+        self.act_card.setStyleSheet(
+            "QFrame{background:#0a1420;border:1px solid #22d3ee44;"
+            "border-radius:12px;}")
+        alay = QVBoxLayout(self.act_card)
+        alay.setContentsMargins(16, 12, 16, 12)
+        at = QLabel("LIVE ACTIVITY  (verified — from real tool executions)")
+        at.setStyleSheet("color:#22d3ee;font-size:9px;font-weight:700;"
+                         "letter-spacing:2px;border:none;")
+        alay.addWidget(at)
+        self.act_now = QLabel("—")
+        self.act_now.setStyleSheet(
+            "color:#e8f6ff;font-size:13px;font-weight:600;border:none;")
+        self.act_now.setWordWrap(True)
+        alay.addWidget(self.act_now)
+        self.act_log = QLabel("")
+        self.act_log.setStyleSheet(
+            "color:#c7e3f5;font-size:11px;border:none;font-family:Consolas;")
+        self.act_log.setWordWrap(True)
+        alay.addWidget(self.act_log)
+        root.addWidget(self.act_card)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -97,6 +122,21 @@ class AgentsPage(QWidget):
         self.refresh()
 
     def refresh(self):
+        if self.activity_provider:
+            try:
+                now, entries = self.activity_provider()
+                self.act_now.setText(
+                    "● IDLE — standing by" if now == "idle"
+                    else f"● BUSY: {now}")
+                lines = []
+                for e in entries[:8]:
+                    mark = "✓" if e.get("status") == "ok" else "✗"
+                    lines.append(f"{e['time']} {mark} {e['action']}"
+                                 + (f" — {e['detail']}" if e.get("detail") else ""))
+                self.act_log.setText("\n".join(lines) or
+                                     "Nothing done yet this session.")
+            except Exception:
+                pass
         try:
             snaps = self.provider() or []
         except Exception:

@@ -49,6 +49,19 @@ def _recent_shared_frame():
     return None
 
 
+def _wait_for_shared_frame(seconds=6.0):
+    """The live mini tab saves a frame roughly every second. If it holds
+    the camera, wait briefly for its next frame instead of failing."""
+    import time
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        shared = _recent_shared_frame()
+        if shared:
+            return shared
+        time.sleep(0.5)
+    return None
+
+
 def capture_frame_jpeg():
     """Grab one frame from the webcam, return JPEG bytes (or raise)."""
     if not CV2_OK:
@@ -61,7 +74,7 @@ def capture_frame_jpeg():
     cap = cv2.VideoCapture(CAMERA_INDEX)
     try:
         if not cap.isOpened():
-            shared = _recent_shared_frame()
+            shared = _wait_for_shared_frame()
             if shared:
                 return shared
             raise RuntimeError(
@@ -72,6 +85,11 @@ def capture_frame_jpeg():
             cap.read()
         ok, frame = cap.read()
         if not ok or frame is None:
+            # probably lost the device to the live panel — use its frames
+            cap.release()
+            shared = _wait_for_shared_frame()
+            if shared:
+                return shared
             raise RuntimeError("Webcam returned no frame.")
         # keep the upload modest
         h, w = frame.shape[:2]
@@ -93,10 +111,11 @@ def capture_frame_jpeg():
         cap.release()
 
 
-def get_camera_description(client=None, question=None) -> str:
+def get_camera_description(client=None, question=None, llm=None) -> str:
     """Look through the webcam once and describe what's there.
 
-    client   : an anthropic.Anthropic() instance (the brain passes its own)
+    llm      : the brain's UniversalLLM — preferred (auto provider fallback)
+    client   : an anthropic.Anthropic() instance (legacy path)
     question : optional specific question, e.g. "what am I holding?"
     """
     try:
@@ -104,16 +123,19 @@ def get_camera_description(client=None, question=None) -> str:
     except Exception as e:
         return f"My eyes are unavailable, sir: {e}"
 
+    prompt = question or ("Describe what you see through this webcam in "
+                          "2-4 sentences, as JARVIS reporting to Shaun. "
+                          "Mention people, objects and anything notable.")
+
+    if llm is not None:
+        return llm.describe_image(jpeg, prompt)
+
     if client is None:
         try:
             from anthropic import Anthropic
             client = Anthropic()
         except Exception as e:
             return f"Camera worked but the vision brain is unreachable: {e}"
-
-    prompt = question or ("Describe what you see through this webcam in "
-                          "2-4 sentences, as JARVIS reporting to Shaun. "
-                          "Mention people, objects and anything notable.")
     try:
         response = client.messages.create(
             model=config.CLAUDE_MODEL,

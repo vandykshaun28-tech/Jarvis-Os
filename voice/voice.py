@@ -66,6 +66,7 @@ class JarvisVoice:
     def __init__(self, on_speaking_start=None, on_speaking_end=None):
         self.on_speaking_start = on_speaking_start
         self.on_speaking_end   = on_speaking_end
+        self.muted   = False
         self.queue   = queue.Queue()
         self._sapi   = None      # persistent SAPI PowerShell (fallback)
         self._player = None      # persistent MediaPlayer PowerShell (neural)
@@ -81,7 +82,31 @@ class JarvisVoice:
 
     # ── public API ───────────────────────────────
     def speak(self, text: str):
-        self.queue.put(text)
+        if not self.muted:
+            self.queue.put(text)
+
+    def stop_now(self):
+        """Cut him off mid-sentence and drop anything queued."""
+        try:
+            while True:
+                self.queue.get_nowait()
+                self.queue.task_done()
+        except queue.Empty:
+            pass
+        # terminate the active playback process — the worker's wait for
+        # __DONE__ unblocks immediately; engines restart lazily on the
+        # next utterance
+        for proc in (self._player, self._sapi):
+            try:
+                if proc and proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
+
+    def set_muted(self, muted: bool):
+        self.muted = bool(muted)
+        if self.muted:
+            self.stop_now()
 
     def shutdown(self):
         for proc in (self._sapi, self._player):
@@ -98,7 +123,8 @@ class JarvisVoice:
         while True:
             text = self.queue.get()
             try:
-                self._say(text)
+                if not self.muted:
+                    self._say(text)
             except Exception as e:
                 print(f"[Voice] Error: {e}")
             self.queue.task_done()

@@ -127,10 +127,55 @@ class JarvisBrain:
         self.system = SystemAgent()
 
         self.memory               = MemoryStore()
-        self.client               = Anthropic()
+        try:
+            self.client = Anthropic()
+        except Exception as e:
+            print(f"[Brain] Anthropic client: {e}")
+            self.client = None
+
+        # Universal brain adapter — Claude first, free fallbacks
+        # (Groq / Gemini / Ollama) when credits run out.
+        _llm_mod = _load("_llm", os.path.join(_brain_dir, "llm.py"))
+        self.llm = _llm_mod.UniversalLLM(self.client)
+
         self.conversation_history = []
         self.voice_callback       = voice_callback
         self.chat_callback        = chat_callback
+
+        # ── real activity ledger — records what ACTUALLY happened,
+        #    straight from tool executions, never from words ──
+        import threading as _th
+        from collections import deque as _dq
+        self._act_lock        = _th.Lock()
+        self.activity         = _dq(maxlen=200)
+        self.current_activity = "idle"
+
+        self._continue_init(voice_callback, chat_callback)
+
+    def log_activity(self, action: str, detail: str = "", status: str = "ok"):
+        with self._act_lock:
+            self.activity.appendleft({
+                "time":   datetime.now().strftime("%H:%M:%S"),
+                "action": action,
+                "detail": str(detail)[:160],
+                "status": status,
+            })
+
+    def activity_report(self, n: int = 15) -> str:
+        with self._act_lock:
+            entries = list(self.activity)[:n]
+        now = self.current_activity
+        lines = [f"RIGHT NOW: {now}"]
+        if not entries:
+            lines.append("No actions recorded yet this session. "
+                         "This list only shows things I have ACTUALLY done.")
+        for e in entries:
+            mark = "✓" if e["status"] == "ok" else "✗"
+            lines.append(f"{e['time']} {mark} {e['action']}"
+                         + (f" — {e['detail']}" if e["detail"] else ""))
+        return "\n".join(lines)
+
+    def _continue_init(self, voice_callback, chat_callback):
 
         # Obsidian
         self.obsidian = None
@@ -270,6 +315,13 @@ class JarvisBrain:
 
 
     def process(self, raw_text: str, files=None) -> str:
+        try:
+            self.current_activity = f"processing: {raw_text.strip()[:50]}"
+            return self._process_inner(raw_text, files)
+        finally:
+            self.current_activity = "idle"
+
+    def _process_inner(self, raw_text: str, files=None) -> str:
         text = raw_text.strip()
         if files:
             # attachments always go to Claude, who can actually see them
@@ -512,6 +564,21 @@ class JarvisBrain:
                 except Exception:
                     return "Please say 'remind me at HH:MM to do something', sir."
 
+        # ── BRAIN PROVIDER STATUS / TEST ────────
+        if any(x in lower for x in ["brain status", "provider status",
+                                     "which brain", "llm status"]):
+            return self.llm.provider_status()
+        if any(x in lower for x in ["test brains", "brain test",
+                                     "test the brains", "test providers"]):
+            return self.llm.provider_test()
+
+        # ── ACTIVITY / "what are you busy with" ─
+        if any(x in lower for x in ["what are you busy with", "what are you doing",
+                                     "what are you working on", "show activity",
+                                     "activity log", "work log", "current task",
+                                     "what have you done"]):
+            return self.activity_report()
+
         # ── CAMERA / EYES ───────────────────────
         if CAMERA_OK and any(x in lower for x in [
                 "what do you see", "what can you see", "look at this",
@@ -519,7 +586,8 @@ class JarvisBrain:
                 "look through the camera", "can you see me"]):
             if self.chat_callback:
                 self.chat_callback("→ camera_look")   # opens the live mini tab
-            return _cam_mod.get_camera_description(client=self.client)
+            return _cam_mod.get_camera_description(client=self.client,
+                                                   llm=self.llm)
 
         # ── AGENTS ──────────────────────────────
         if self.agent_manager:
@@ -668,6 +736,9 @@ class JarvisBrain:
              "description": "Recall what has already been studied about a topic from the permanent knowledge base.",
              "input_schema": {"type": "object", "properties": {
                  "topic": {"type": "string"}}, "required": ["topic"]}},
+            {"name": "activity_report",
+             "description": "The verified ledger of actions actually taken this session (tool executions with success/fail). Use when Shaun asks what you are busy with or what you have done — answer from THIS, never from memory or imagination.",
+             "input_schema": {"type": "object", "properties": {}}},
             {"name": "read_file",
              "description": "Read a text/code file from disk and return its contents (up to ~20k chars).",
              "input_schema": {"type": "object", "properties": {
@@ -789,6 +860,8 @@ class JarvisBrain:
             if name == "recall_knowledge":
                 if not self.researcher: return "Researcher offline."
                 return self.researcher.recall(args["topic"]) or "Nothing studied on that topic yet."
+            if name == "activity_report":
+                return self.activity_report()
             if name == "read_file":
                 path = args["path"]
                 try:
@@ -837,7 +910,8 @@ class JarvisBrain:
                 if not CAMERA_OK:
                     return "Camera module unavailable — is opencv-python installed?"
                 return _cam_mod.get_camera_description(
-                    client=self.client, question=args.get("question"))
+                    client=self.client, question=args.get("question"),
+                    llm=self.llm)
             if name == "agents_status":
                 return self.agent_manager.status_text() if self.agent_manager else "Agents offline."
             if name == "agent_control":
@@ -916,52 +990,65 @@ class JarvisBrain:
         if len(self.conversation_history) > 12:
             self.conversation_history = self.conversation_history[-12:]
 
-        messages = list(self.conversation_history)
         try:
-            reply_text = ""
-            tools_used = []
-            ran_out    = True
-            for _round in range(10):
-                response = self.client.messages.create(
-                    model=config.CLAUDE_MODEL,
-                    max_tokens=1024,
-                    system=self.system_prompt(context_for=text),
-                    tools=self._tool_definitions(),
-                    messages=messages,
-                )
-                tool_blocks = [b for b in response.content
-                               if getattr(b, "type", "") == "tool_use"]
-                text_parts  = [b.text for b in response.content
-                               if getattr(b, "type", "") == "text"]
+            def _exec_logged(name, targs):
+                if self.chat_callback:
+                    self.chat_callback(f"→ {name}")
+                args_hint = ", ".join(
+                    f"{k}={str(v)[:40]}" for k, v in list((targs or {}).items())[:3])
+                self.current_activity = f"{name}({args_hint})"
+                out = self._execute_tool(name, targs or {})
+                out_s = str(out)
+                failed = any(w in out_s[:120] for w in
+                             ("FAILED", "error", "Error", "Could not",
+                              "offline", "unavailable"))
+                self.log_activity(name, args_hint or out_s[:80],
+                                  status="fail" if failed else "ok")
+                return out
 
-                if response.stop_reason == "tool_use" and tool_blocks:
-                    # Show interim narration ("Right, opening VS Code...")
-                    interim = " ".join(text_parts).strip()
-                    if interim and self.chat_callback:
-                        self.chat_callback(interim)
-                    messages.append({"role": "assistant", "content": response.content})
-                    results = []
-                    for tb in tool_blocks:
-                        if self.chat_callback:
-                            self.chat_callback(f"→ {tb.name}")
-                        tools_used.append(tb.name)
-                        out = self._execute_tool(tb.name, tb.input or {})
-                        results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": str(out)[:3000],
-                        })
-                    messages.append({"role": "user", "content": results})
-                    continue
+            user_content = self.conversation_history[-1]["content"]
+            history      = self.conversation_history[:-1]
+            res = self.llm.run_tool_loop(
+                system=self.system_prompt(context_for=text),
+                history=history,
+                user_content=user_content,
+                tools=self._tool_definitions(),
+                execute=_exec_logged,
+                on_text=self.chat_callback,
+            )
 
-                reply_text = " ".join(text_parts).strip()
-                ran_out = False
-                break
+            if res.get("provider") is None:
+                # every brain failed — report each one's ACTUAL reason
+                if self.conversation_history and \
+                        self.conversation_history[-1]["role"] == "user":
+                    self.conversation_history.pop()
+                err = res.get("error", "")
+                lines = ["All my brains failed on that one, sir:"]
+                for part in err.split(" | "):
+                    lines.append(f"  • {part[:130]}")
+                low = err.lower()
+                if "429" in err or "rate limit" in low:
+                    lines.append("The rate-limited one recovers by itself — "
+                                 "try again in a minute.")
+                if "credit balance" in low:
+                    lines.append("Claude needs a top-up at console.anthropic.com.")
+                if "gemini" in low and ("401" in err or "400" in err or "403" in err):
+                    lines.append("The Gemini key looks invalid — get a fresh one "
+                                 "at aistudio.google.com/apikey (starts with "
+                                 "AIza) and update C:\\jarvis\\keys.py.")
+                return "\n".join(lines)
 
+            if self.llm.active_provider and self.llm.active_provider != "anthropic":
+                # let Shaun know quietly which brain answered
+                if self.chat_callback:
+                    self.chat_callback(
+                        f"(fallback brain: {self.llm.active_provider})")
+
+            reply_text = res.get("text", "")
             # Never claim success we didn't earn. If the round budget ran
             # out mid-plan, say exactly what happened instead of "Done".
-            if ran_out and not reply_text:
-                used = ", ".join(dict.fromkeys(tools_used)) or "no tools"
+            if res.get("ran_out") and not reply_text:
+                used = ", ".join(dict.fromkeys(res.get("tools_used", []))) or "no tools"
                 reply_text = (f"I ran out of planning steps before finishing, sir. "
                               f"I used: {used}. The task is NOT confirmed complete — "
                               f"tell me to continue and I will pick it up from there.")
@@ -1083,6 +1170,13 @@ class JarvisBrain:
             "sure, say you are not sure. If you did not do something, never imply "
             "you did. A plain 'that failed, here is why' is always the right "
             "answer over a comfortable lie. "
+            "(4) NO FICTIONAL BACKGROUND WORK: you cannot 'build modules', 'work "
+            "on features' or 'continue later' in the background. The ONLY "
+            "background processes that exist are the Trading/Shopify/Mind agents "
+            "and topic research. Work happens NOW, with tools, in this reply — or "
+            "not at all. Every real action lands in your activity ledger "
+            "(activity_report); when asked what you are busy with, answer from "
+            "that ledger only. "
             "You can now read, write and create files (read_file / write_file / "
             "list_directory) — every overwrite is auto-backed-up, so code "
             "confidently when Shaun asks for coding work. For rewriting your OWN "

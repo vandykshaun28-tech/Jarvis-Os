@@ -151,8 +151,18 @@ class DashboardPage(QWidget):
             self._refresh_trading()
             self._refresh_mind()
             self._refresh_listen()
+            self._refresh_now()
         except Exception:
             pass
+
+    def _refresh_now(self):
+        get = self.providers.get("activity")
+        if not get:
+            return
+        now, _ = get()
+        if now and now not in ("idle", "unknown", "starting up"):
+            self.card_now.set(now[:70], "live — from the activity ledger",
+                              "#f5a623")
 
     def _refresh_trading(self):
         get = self.providers.get("trading")

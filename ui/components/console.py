@@ -72,6 +72,7 @@ class Console(QWidget):
 
     commandSubmitted = Signal(str)
     filesSubmitted   = Signal(str, list)   # text, [file paths]
+    muteClicked      = Signal()            # speaker button pressed
 
     def __init__(self):
         super().__init__()
@@ -89,6 +90,22 @@ class Console(QWidget):
             (datetime.now().strftime("%H:%M:%S"), who, str(text)))
         if len(self.transcript) > 1000:
             self.transcript = self.transcript[-1000:]
+
+    def set_mute_state(self, muted: bool):
+        if muted:
+            self.mute_btn.setText("🔇")
+            self.mute_btn.setStyleSheet(
+                f"QPushButton{{background:#2a1520;border:1px solid #ff5566aa;"
+                f"border-radius:6px;color:#ff5566;font-size:11px;}}")
+            self.mute_btn.setToolTip("JARVIS is muted — click to give him "
+                                     "his voice back")
+        else:
+            self.mute_btn.setText("🔊")
+            self.mute_btn.setStyleSheet(
+                f"QPushButton{{background:#0d1e2e;border:1px solid {LINE};"
+                f"border-radius:6px;color:{DIM};font-size:11px;}}"
+                f"QPushButton:hover{{border:1px solid {CYAN};color:{CYAN};}}")
+            self.mute_btn.setToolTip("Stop speaking / mute JARVIS's voice")
 
     def copy_all(self):
         lines = [f"[{t}] {who}: {txt}" for t, who, txt in self.transcript]
@@ -110,6 +127,17 @@ class Console(QWidget):
                                  f"letter-spacing:3px;border:none;")
         title_row.addWidget(self.title)
         title_row.addStretch()
+
+        self.mute_btn = QPushButton("🔊")
+        self.mute_btn.setFixedSize(24, 24)
+        self.mute_btn.setCursor(Qt.PointingHandCursor)
+        self.mute_btn.setToolTip("Stop speaking / mute JARVIS's voice")
+        self.mute_btn.setStyleSheet(
+            f"QPushButton{{background:#0d1e2e;border:1px solid {LINE};"
+            f"border-radius:6px;color:{DIM};font-size:11px;}}"
+            f"QPushButton:hover{{border:1px solid {CYAN};color:{CYAN};}}")
+        self.mute_btn.clicked.connect(self.muteClicked.emit)
+        title_row.addWidget(self.mute_btn)
 
         self.copy_btn = QPushButton("⧉")
         self.copy_btn.setFixedSize(24, 24)

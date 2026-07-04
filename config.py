@@ -10,7 +10,21 @@ environment variable if it lives somewhere unusual.
 """
 
 import os
+import sys
 from pathlib import Path
+
+# ── keys.py: paste-your-keys-in-a-file (beats setx headaches) ──
+# If C:\jarvis\keys.py exists, any keys in it are injected into the
+# environment so every module (Anthropic SDK, llm.py) just works.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import keys as _keys
+    for _name in ("GROQ_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        _val = (getattr(_keys, _name, "") or "").strip()
+        if _val and not os.environ.get(_name):
+            os.environ[_name] = _val
+except ImportError:
+    pass
 
 # ── Project layout ──────────────────────────────
 ROOT_DIR        = Path(__file__).resolve().parent
@@ -31,6 +45,22 @@ VAULT_PATH = Path(os.environ.get(
 
 # ── AI ──────────────────────────────────────────
 CLAUDE_MODEL = "claude-sonnet-4-6"
+
+# Brain providers, tried in order. Anthropic (Claude) is the smartest;
+# when it's out of credits JARVIS automatically falls back to the FREE
+# ones below. Get free keys (no card needed):
+#   Groq:   console.groq.com  → set env var GROQ_API_KEY
+#   Gemini: aistudio.google.com/apikey → set env var GEMINI_API_KEY
+# Ollama = fully local & free forever (install from ollama.com), used
+# last if it's running.
+LLM_PROVIDER_ORDER = ["anthropic", "groq", "gemini", "ollama"]
+GROQ_MODEL   = "llama-3.3-70b-versatile"
+GEMINI_MODEL = "gemini-2.0-flash"
+# tried in order if the first model name is rejected (Google renames often)
+GEMINI_MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-flash-latest",
+                          "gemini-1.5-flash"]
+OLLAMA_MODEL = "qwen2.5:7b"
+OLLAMA_URL   = "http://localhost:11434/v1"
 
 # ── Personal ────────────────────────────────────
 OWNER_NAME = "Shaun"

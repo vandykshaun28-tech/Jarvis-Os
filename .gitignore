@@ -8,6 +8,9 @@ make_shortcut.vbs
 memory/last_camera.jpg
 memory/file_backups/
 
+# API keys — NEVER commit
+keys.py
+
 # Virtual environments
 venv/
 .env

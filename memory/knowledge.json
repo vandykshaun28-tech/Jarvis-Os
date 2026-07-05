@@ -679,20 +679,55 @@
     "fact_count": 14
   },
   "OpenCV integration with GPT-4o Vision": {
-    "summary": "Jan 12, 2026 · Learn to use GPT-4o Vision for image analysis, OCR, and UI interpretation. Using OpenAI GPT-4 Vision Model with OpenCV Learn how to setup requests to OpenAI endpoints and use the gpt-4-vision-preview endpoint with the popular open-source computer vision library OpenCV May 16, 2024 · OpenAI’s new, flagship model, GPT-4o, has been out for a whole two days now! A big deal was made of its vision capabilities and I wanted to put that to the test, so what better way to do that than to u",
+    "summary": "- ChatGPT 4o (GPT-4o) описывается как более быстрый и отзывчивый по сравнению с предыдущей моделью GPT-4. - Увеличенная скорость GPT-4o, вероятно, достигается за счет некоторых возможностей или точности. Contribute to opencv/opencv development by creating an account on GitHub.No results found. Instructions to use ruslandev/llama-3-8b-gpt-4o-ru1.0-gguf with libraries, inference providers, notebooks, and local apps.",
     "facts": [
-      "Jan 12, 2026 · Learn to use GPT-4o Vision for image analysis, OCR, and UI interpretation.",
-      "Using OpenAI GPT-4 Vision Model with OpenCV Learn how to setup requests to OpenAI endpoints and use the gpt-4-vision-preview endpoint with the popular open-source computer vision library OpenCV May 16, 2024 · OpenAI’s new, flagship model, GPT-4o, has been out for a whole two days now!",
-      "A big deal was made of its vision capabilities and I wanted to put that to the test, so what better way to do that than to use OpenAI’s API to interface with the model?",
-      "Learn how to setup requests to OpenAI endpoints and use the gpt-4-vision-preview endpoint with the popular open-source computer vision library OpenCV Jan 12, 2026 · Learn to use GPT-4o Vision for image analysis, OCR, and UI interpretation."
+      "- ChatGPT 4o (GPT-4o) описывается как более быстрый и отзывчивый по сравнению с предыдущей моделью GPT-4.",
+      "- Увеличенная скорость GPT-4o, вероятно, достигается за счет некоторых возможностей или точности.",
+      "Contribute to opencv/opencv development by creating an account on GitHub.No results found.",
+      "Instructions to use ruslandev/llama-3-8b-gpt-4o-ru1.0-gguf with libraries, inference providers, notebooks, and local apps.",
+      "Tangram Vision offers advanced computer vision solutions and services, specializing in providing AI-driven insights and analysis for various industries and applications.Mastering OpenCV with Python.",
+      "This guide will explain what GPT-4o is, how it operates, and the various ways it can enhance interactions and productivity across different applications.",
+      "Поддерживаемый API Chatgpt 4o от OpenAI, gpt4v.net предлагает пользователям бесплатный доступ к онлайн-решениям GPT-4o.",
+      "Confirm You’re on GPT-4o or GPT-5 With Proper Access."
     ],
     "sources": [
-      "https://getstream.io/blog/gpt-4o-vision-guide/",
-      "https://skyneticist.github.io/gpt-cv/",
-      "https://levelup.gitconnected.com/using-gpt-4os-vision-capabilities-fb0a89c7d1de",
-      "https://medium.com/coinmonks/using-openai-gpt-4-vision-model-with-opencv-af0d1e687f76"
+      "https://openai.com/index/hello-gpt-4o/",
+      "https://gpt4v.net/ru",
+      "https://github.com/opencv/opencv/releases",
+      "https://huggingface.co/ruslandev/llama-3-8b-gpt-4o-ru1.0-gguf",
+      "https://visualgpt.io/ai-models/gpt-image-2",
+      "https://opencv.org/releases/"
     ],
-    "studied_at": "2026-07-04 15:05",
-    "fact_count": 4
+    "studied_at": "2026-07-04 15:29",
+    "fact_count": 8
+  },
+  "pyautogui integration with JARVIS": {
+    "summary": "Inspired by Tony Stark's JARVIS from the Marvel Cinematic Universe, this assistant combines natural language processing, system automation, and intelligent task management to transform how you interact with your computer. At the end of the series you will be able to have your very own Jarvis at your command. The benefit of using PyAutoGUI, as opposed to a script that directly generates the image file, is that you can use the brush tools that MS Paint provides. Python Jarvis tutorial episode 5 -",
+    "facts": [
+      "Inspired by Tony Stark's JARVIS from the Marvel Cinematic Universe, this assistant combines natural language processing, system automation, and intelligent task management to transform how you interact with your computer.",
+      "At the end of the series you will be able to have your very own Jarvis at your command.",
+      "The benefit of using PyAutoGUI, as opposed to a script that directly generates the image file, is that you can use the brush tools that MS Paint provides.",
+      "Python Jarvis tutorial episode 5 - Today we are going take a small step into automating basic tasks that we can request to be completed with just a simple co...",
+      "Published September 17, 2022 October 26, 2022 - You will learn how you can give voice commands to this AI Assistant (JARVIS).",
+      "November 9, 2024 - Whether you continue adding features or explore new AI projects, your own Jarvis in Python is just the beginning of what you can accomplish with programming.",
+      "Contribute to Anik00223/JARVIS-AI-ASSISTANT- development by creating an account on GitHub.",
+      "PyAutoGUI does not work for all video games, so I wrote PyDirectInput to solve this.",
+      "With it, you can easily swap your PyAutoGUI code to use DirectInput inst...",
+      "PyAutoGUI lets your Python scripts control the mouse and keyboard to automate interactions with other applications.",
+      "PyAutoGUI works on Windows, macOS, and Linux, and runs on Python 2 and 3.",
+      "To install with pip, run pip install pyautogui.",
+      "In this tutorial, we're going to learn how to use pyautogui library in Python 3.",
+      "The PyAutoGUI library provides cross-platform support for managing mouse and keyboard operations through code to enable automation of tasks."
+    ],
+    "sources": [
+      "https://github.com/purvanshjoshi/jarvis-ai-assistant",
+      "https://github.com/Blazehue/J.A.R.V.I.S",
+      "https://autogui.readthedocs.io/en/latest/source/pyautogui.html",
+      "https://www.youtube.com/watch?v=EagAOkbsq4I",
+      "https://www.udemy.com/course/learn-to-create-ai-assistant-jarvis-with-python/",
+      "https://getprojects.org/create-your-own-jarvis-using-python-a-step-by-step-guide/"
+    ],
+    "studied_at": "2026-07-04 15:23",
+    "fact_count": 14
   }
 }

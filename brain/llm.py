@@ -42,12 +42,18 @@ def _providers():
         "groq":      {"kind": "openai", "vision": False,
                       "base": "https://api.groq.com/openai/v1",
                       "model": config.GROQ_MODEL,
+                      "models": [config.GROQ_MODEL]
+                                + list(getattr(config, "GROQ_MODEL_FALLBACKS", [])),
                       "key": os.environ.get("GROQ_API_KEY", ""),
                       "ok": bool(os.environ.get("GROQ_API_KEY"))},
         "openrouter": {"kind": "openai", "vision": False,
                        "base": "https://openrouter.ai/api/v1",
                        "model": getattr(config, "OPENROUTER_MODEL",
                                         "meta-llama/llama-3.3-70b-instruct:free"),
+                       "models": [getattr(config, "OPENROUTER_MODEL",
+                                          "meta-llama/llama-3.3-70b-instruct:free")]
+                                 + list(getattr(config,
+                                        "OPENROUTER_MODEL_FALLBACKS", [])),
                        "key": os.environ.get("OPENROUTER_API_KEY", ""),
                        "ok": bool(os.environ.get("OPENROUTER_API_KEY"))},
         "gemini":    {"kind": "gemini-native", "vision": True,
@@ -239,10 +245,14 @@ class UniversalLLM:
     # ── the tool loop, provider-agnostic ────────
 
     def run_tool_loop(self, system, history, user_content, tools,
-                      execute, on_text=None, max_rounds=10):
+                      execute, on_text=None, max_rounds=10,
+                      compact_system=None, compact_tools=None):
         """history: prior turns [{'role','content'(str)}...]
            user_content: str or Anthropic-style block list for THIS turn.
            execute(name, args) -> str result.
+           compact_system/compact_tools: slimmer variants used for free
+           providers whose per-minute token budgets a full-fat request
+           can blow single-handedly. Claude gets the full version.
            Returns dict(text, tools_used, ran_out, provider, error)."""
         order = [n for n in config.LLM_PROVIDER_ORDER if _providers().get(n)]
         errors = []
@@ -254,9 +264,14 @@ class UniversalLLM:
             if prov["kind"] == "anthropic" and self.anthropic is None:
                 errors.append("anthropic: client not initialised")
                 continue
+            if name == "anthropic":
+                use_system, use_tools = system, tools
+            else:
+                use_system = compact_system or system
+                use_tools = compact_tools if compact_tools is not None else tools
             try:
-                result = self._loop_with(name, prov, system, history,
-                                         user_content, tools, execute,
+                result = self._loop_with(name, prov, use_system, history,
+                                         user_content, use_tools, execute,
                                          on_text, max_rounds)
                 self.active_provider = name
                 result["provider"] = name
@@ -342,50 +357,65 @@ class UniversalLLM:
             return {"text": text, "tools_used": [], "ran_out": False,
                     "error": ""}
 
-        # OpenAI-compatible providers
-        oa = [{"role": "system", "content": system}]
-        for h in history:
-            oa.append({"role": h["role"],
-                       "content": _blocks_to_openai(h["content"])})
-        oa.append({"role": "user", "content": _blocks_to_openai(user_content)})
-        oa_tools = _tools_to_openai(tools) if tools else None
-
-        glitches = 0
-        for _ in range(max_rounds + 2):
+        # OpenAI-compatible providers — with model-hopping: if one model
+        # is saturated (free lanes get crowded), try the next.
+        model_candidates = prov.get("models") or [prov["model"]]
+        last_exc = None
+        for model_name in model_candidates:
+            p2 = dict(prov)
+            p2["model"] = model_name
+            oa = [{"role": "system", "content": system}]
+            for h in history[-8:]:            # token diet: recent turns only
+                c = _blocks_to_openai(h["content"])
+                if isinstance(c, str) and len(c) > 1500:
+                    c = c[:1500] + "…"
+                oa.append({"role": h["role"], "content": c})
+            oa.append({"role": "user",
+                       "content": _blocks_to_openai(user_content)})
+            oa_tools = _tools_to_openai(tools) if tools else None
+            tools_used = []
             try:
-                choice = self._openai_call(prov, oa, oa_tools, 1024)
-            except ToolCallGlitch:
-                glitches += 1
-                if glitches >= 2:
-                    # model keeps fumbling tool syntax — answer in plain
-                    # words instead of failing the whole conversation
-                    oa_tools = None
-                continue
-            msg = choice.get("message", {})
-            calls = msg.get("tool_calls") or []
-            if choice.get("finish_reason") == "tool_calls" or calls:
-                if msg.get("content") and on_text:
-                    on_text(str(msg["content"]).strip())
-                oa.append({"role": "assistant",
-                           "content": msg.get("content"),
-                           "tool_calls": calls})
-                for c in calls:
-                    fn = c.get("function", {})
-                    tname = fn.get("name", "?")
+                glitches = 0
+                for _ in range(max_rounds + 2):
                     try:
-                        targs = json.loads(fn.get("arguments") or "{}")
-                    except Exception:
-                        targs = {}
-                    tools_used.append(tname)
-                    out = execute(tname, targs)
-                    oa.append({"role": "tool",
-                               "tool_call_id": c.get("id", ""),
-                               "content": str(out)[:3000]})
-                continue
-            return {"text": str(msg.get("content") or "").strip(),
-                    "tools_used": tools_used, "ran_out": False, "error": ""}
-        return {"text": "", "tools_used": tools_used,
-                "ran_out": True, "error": ""}
+                        choice = self._openai_call(p2, oa, oa_tools, 1024)
+                    except ToolCallGlitch:
+                        glitches += 1
+                        if glitches >= 2:
+                            # model keeps fumbling tool syntax — answer in
+                            # plain words instead of failing the chat
+                            oa_tools = None
+                        continue
+                    msg = choice.get("message", {})
+                    calls = msg.get("tool_calls") or []
+                    if choice.get("finish_reason") == "tool_calls" or calls:
+                        if msg.get("content") and on_text:
+                            on_text(str(msg["content"]).strip())
+                        oa.append({"role": "assistant",
+                                   "content": msg.get("content"),
+                                   "tool_calls": calls})
+                        for c in calls:
+                            fn = c.get("function", {})
+                            tname = fn.get("name", "?")
+                            try:
+                                targs = json.loads(fn.get("arguments") or "{}")
+                            except Exception:
+                                targs = {}
+                            tools_used.append(tname)
+                            out = execute(tname, targs)
+                            oa.append({"role": "tool",
+                                       "tool_call_id": c.get("id", ""),
+                                       "content": str(out)[:3000]})
+                        continue
+                    return {"text": str(msg.get("content") or "").strip(),
+                            "tools_used": tools_used, "ran_out": False,
+                            "error": ""}
+                return {"text": "", "tools_used": tools_used,
+                        "ran_out": True, "error": ""}
+            except ProviderDead as e:
+                last_exc = e
+                continue   # next model candidate
+        raise last_exc or ProviderDead("no model candidates worked")
 
     # ── simple one-shot (Mind, small jobs) ──────
 

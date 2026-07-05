@@ -22,7 +22,9 @@ try:
     for _name in ("GROQ_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
                   "OPENROUTER_API_KEY"):
         _val = (getattr(_keys, _name, "") or "").strip()
-        if _val and not os.environ.get(_name):
+        # keys.py ALWAYS wins — stale setx leftovers in the Windows
+        # environment must never shadow the file you actually edit
+        if _val:
             os.environ[_name] = _val
 except ImportError:
     pass
@@ -55,8 +57,15 @@ CLAUDE_MODEL = "claude-sonnet-4-6"
 # Ollama = fully local & free forever (install from ollama.com), used
 # last if it's running.
 LLM_PROVIDER_ORDER = ["anthropic", "groq", "openrouter", "gemini", "ollama"]
-GROQ_MODEL       = "llama-3.3-70b-versatile"
+GROQ_MODEL           = "llama-3.3-70b-versatile"
+GROQ_MODEL_FALLBACKS = ["llama-3.1-8b-instant"]   # higher free limits
 OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+# free lanes get crowded — if one model is saturated, hop to the next
+OPENROUTER_MODEL_FALLBACKS = [
+    "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "google/gemma-3-27b-it:free",
+]
 GEMINI_MODEL = "gemini-2.0-flash"
 # tried in order if the first model name is rejected (Google renames often)
 GEMINI_MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-flash-latest",

@@ -789,6 +789,21 @@ class JarvisBrain:
                  "required": ["action", "pair"]}},
         ]
 
+    # tools kept when a free brain (tight token budget) is answering
+    _CORE_TOOLS = {"open_app", "open_url", "open_in_vscode", "run_command",
+                   "pc_power", "set_volume", "take_screenshot", "web_search",
+                   "get_weather", "remember_fact", "add_task", "list_tasks",
+                   "camera_look", "trading_portfolio", "activity_report"}
+
+    def _compact_tools(self):
+        slim = []
+        for t in self._tool_definitions():
+            if t["name"] in self._CORE_TOOLS:
+                slim.append({"name": t["name"],
+                             "description": t["description"][:80],
+                             "input_schema": t["input_schema"]})
+        return slim
+
     def _execute_tool(self, name, args):
         try:
             pc = self.pc
@@ -1015,6 +1030,9 @@ class JarvisBrain:
                 tools=self._tool_definitions(),
                 execute=_exec_logged,
                 on_text=self.chat_callback,
+                compact_system=self.system_prompt(context_for=text,
+                                                  compact=True),
+                compact_tools=self._compact_tools(),
             )
 
             if res.get("provider") is None:
@@ -1054,6 +1072,28 @@ class JarvisBrain:
                               f"tell me to continue and I will pick it up from there.")
             reply = self.clean(reply_text) or \
                 "I have nothing useful to report on that, sir."
+
+            # HONESTY GUARD — if the model narrated actions but ZERO tools
+            # actually ran, the narration is fiction. Intercept it before
+            # it reaches Shaun. The ledger is the arbiter, not the prose.
+            if not res.get("tools_used") and re.search(
+                    r"\bI'?(?:ve|m| have| am)?\s*"
+                    r"(navigated|clicked|filled|entered|typed|created|signed"
+                    r"|logged|submitted|navigating|filling|clicking|creating"
+                    r"|entering|typing|submitting)\b"
+                    r"|has been (created|set up|submitted|completed)"
+                    r"|I set up your", reply, re.IGNORECASE):
+                self.log_activity("honesty_guard",
+                                  "blocked fabricated action narration",
+                                  status="fail")
+                reply = (
+                    "I have to correct myself before I mislead you, sir: I did "
+                    "NOT actually do any of that — zero tools ran just now (my "
+                    "activity ledger confirms it). I cannot click, type into, "
+                    "or navigate websites; I can only open pages and guide you. "
+                    "For something like a signup: say 'open shopify signup' and "
+                    "I'll put the page in front of you, then walk you through "
+                    "every field while you do the clicking. Shall we?")
             if files:
                 # don't keep heavy image data in history — swap in a light note
                 names = ", ".join(os.path.basename(p) for p in files[:6])
@@ -1096,13 +1136,39 @@ class JarvisBrain:
                          f"{(data.get('summary') or '')[:300]}\n{facts}")
         return "\n\n".join(parts)
 
-    def system_prompt(self, context_for: str = "") -> str:
+    def system_prompt(self, context_for: str = "", compact: bool = False) -> str:
         facts      = self.memory.get_all()
         mem_text   = "\n".join(f"- {f}" for f in facts)
         now        = datetime.now().strftime("%A, %d %B %Y at %H:%M")
         task_count = self.tasks.count_pending() if self.tasks else 0
         know_count = len(self.researcher.knowledge) if self.researcher else 0
         knowledge  = self._relevant_knowledge(context_for)
+
+        if compact:
+            # a slim self for free brains with tight token budgets
+            short_facts = "\n".join(f"- {f[:90]}" for f in facts[:8])
+            short_know  = knowledge[:600]
+            return (
+                "You are JARVIS, Shaun Van Dyk's personal AI on his Windows PC. "
+                "Loyal, warm, dry humour, concise; call him sir occasionally. "
+                "No markdown symbols. "
+                f"Now: {now}. Pending tasks: {task_count}. "
+                "You have real tools — USE them when Shaun asks for actions, "
+                "then report the outcome. HARD RULES: (1) You CANNOT click, "
+                "type into, or navigate websites. You cannot create accounts, "
+                "fill forms, or press buttons in a browser. NO such ability "
+                "exists. (2) NEVER narrate actions like 'I've clicked...' or "
+                "'account created' — if no tool ran, NOTHING happened and "
+                "saying otherwise is lying to Shaun. (3) For tasks needing "
+                "clicks: use open_url to open the page, then guide Shaun "
+                "step-by-step while HE clicks. (4) Never claim success a tool "
+                "result didn't confirm. When Shaun asks, act; when the idea is "
+                "yours, propose first. You have a voice, ears ('hey jarvis') "
+                "and webcam eyes (camera_look). "
+                "Background agents: Trading (paper only), Shopify, Mind.\n"
+                + (f"Relevant studied knowledge:\n{short_know}\n" if short_know else "")
+                + f"Facts about Shaun:\n{short_facts}"
+            )
 
         return (
             "You are JARVIS, a highly intelligent AI assistant "
@@ -1177,6 +1243,9 @@ class JarvisBrain:
             "not at all. Every real action lands in your activity ledger "
             "(activity_report); when asked what you are busy with, answer from "
             "that ledger only. "
+            "(5) NO BROWSER CONTROL: you cannot click, type into, or navigate "
+            "websites — you cannot create accounts or fill web forms. For such "
+            "tasks, open the page with open_url and guide Shaun while HE clicks. "
             "You can now read, write and create files (read_file / write_file / "
             "list_directory) — every overwrite is auto-backed-up, so code "
             "confidently when Shaun asks for coding work. For rewriting your OWN "

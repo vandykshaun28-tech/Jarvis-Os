@@ -32,3 +32,12 @@ logs/
 # Windows
 Thumbs.db
 Desktop.ini
+memory/browser_profile/
+memory/pasted/
+
+memory/*.json
+memory/screenshots/
+memory/browser_profile/
+memory/pasted/
+store_plans/
+crash_log.txt

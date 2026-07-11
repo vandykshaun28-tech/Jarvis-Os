@@ -124,6 +124,29 @@ class StatusCard(QFrame):
 
     # --------------------------------------------------
 
+    def retheme(self):
+        from ui.styles.theme_manager import pal
+        p = pal()
+        self.setStyleSheet(f"""
+        QFrame{{
+            background:{p['panel']};
+            border:1px solid {p['line']};
+            border-radius:12px;
+        }}
+        QLabel{{ border:none; background:transparent; }}
+        #icon_chip{{
+            background:rgba({self._rgba(self.color, 28)});
+            border:1px solid {self.color};
+            border-radius:17px;
+            font-size:15px;
+            color:{self.color};
+        }}
+        #title{{ color:{p['text2']}; font-size:10px; font-weight:600; }}
+        #value{{ color:{p['text']}; font-size:15px; font-weight:bold; }}
+        """)
+
+    # --------------------------------------------------
+
     @staticmethod
     def _rgba(hex_color, alpha):
 

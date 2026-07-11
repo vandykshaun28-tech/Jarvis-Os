@@ -14,6 +14,18 @@ from PySide6.QtCore import Qt
 from ui.components.sidebar_button import SidebarButton
 
 
+def _shopify_icon():
+    """Path to the real Shopify logo if it exists, else the old glyph."""
+    try:
+        import config
+        p = config.ROOT_DIR / "assets" / "shopify_logo.png"
+        if p.exists():
+            return str(p)
+    except Exception:
+        pass
+    return "\U0001f6d2"
+
+
 class SidebarStatusRow(QWidget):
 
     def __init__(self, label, value, color="#2ecc71"):
@@ -167,7 +179,7 @@ class Sidebar(QWidget):
 
             ("\U0001f697", "Vehicle"),
 
-            ("\U0001f6d2", "Shopify"),
+            (_shopify_icon(), "Shopify"),
 
             ("\u2699", "Settings"),
 
@@ -305,6 +317,43 @@ class Sidebar(QWidget):
         }
 
         """)
+
+    # --------------------------------------------------
+
+    def retheme(self):
+        from ui.styles.theme_manager import pal
+        p = pal()
+        self.setStyleSheet(f"""
+        QWidget{{
+            background:{p['panel']};
+            border:1px solid {p['line']};
+            border-radius:12px;
+            color:{p['accent']};
+        }}
+        QScrollArea{{ border:none; background:transparent; }}
+        QScrollBar:vertical{{ background:transparent; width:5px; margin:0; }}
+        QScrollBar::handle:vertical{{ background:{p['line']};
+            border-radius:2px; min-height:30px; }}
+        QScrollBar::handle:vertical:hover{{ background:{p['accent']}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{{
+            height:0px; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical{{
+            background:transparent; }}
+        """)
+        self.toggle.setStyleSheet(
+            f"QPushButton{{background:{p['panel']};border:1px solid "
+            f"{p['line']};border-radius:14px;color:{p['text2']};"
+            f"font-size:13px;}}"
+            f"QPushButton:hover{{border:1px solid {p['accent']};"
+            f"color:{p['accent']};}}")
+        self.sys_label.setStyleSheet(
+            f"color:{p['dim']};font-size:10px;font-weight:700;"
+            f"letter-spacing:2px;border:none;padding-top:2px;")
+        self.footer_label.setStyleSheet(
+            f"color:{p['accent']};font-size:11px;font-weight:600;"
+            f"border:none;padding-top:4px;")
+        for b in self.buttons:
+            b.retheme()
 
     # --------------------------------------------------
 

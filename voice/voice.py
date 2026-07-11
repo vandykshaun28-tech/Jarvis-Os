@@ -53,9 +53,20 @@ _URL = re.compile(r"https?://\S+")
 
 
 def _speakable(text: str) -> str:
-    """Strip things that sound terrible when read aloud."""
+    """Strip things that sound terrible when read aloud — including
+    markdown, which the chat now renders visually but must never be
+    spoken as 'asterisk asterisk'."""
+    # fenced code blocks: don't read code aloud
+    text = re.sub(r"```[a-zA-Z0-9_+-]*\n?.*?```",
+                  " — code is on screen — ", text, flags=re.S)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)   # md links FIRST
     text = _URL.sub("a link", text)
     text = _EMOJI.sub("", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)   # bold
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)  # italics
+    text = re.sub(r"`([^`\n]+)`", r"\1", text)     # inline code
+    text = re.sub(r"^#+\s*", "", text, flags=re.M) # headers
+    text = re.sub(r"^\s*[-•]\s+", ", ", text, flags=re.M)  # bullets
     text = text.replace("→", ", then ").replace("•", ",")
     text = re.sub(r"\s+", " ", text)
     return text.strip()

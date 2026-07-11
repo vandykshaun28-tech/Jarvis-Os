@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from PySide6.QtGui import QIcon, QAction
+from PySide6.QtCore import Qt
 
 from ui.components.header import Header
 from ui.components.sidebar import Sidebar
@@ -22,8 +23,11 @@ from ui.pages.agents import AgentsPage
 from ui.pages.trading import TradingPage
 from ui.pages.shopify import ShopifyPage
 from ui.pages.placeholder import PlaceholderPage
+from ui.pages.settings import SettingsPage
+from core import settings as user_settings
 from ui.widgets.grid_backdrop import GridBackdrop
 from ui.widgets.camera_panel import CameraPanel
+from ui.widgets.info_panel import InfoPanel
 
 from core.controller import JarvisController
 
@@ -80,7 +84,7 @@ class MainWindow(QMainWindow):
         # Header
         # ----------------------------------------
 
-        self.header = Header()
+        self.header = Header(controller=self.controller)
 
         root.addWidget(self.header)
 
@@ -122,6 +126,7 @@ class MainWindow(QMainWindow):
             "mind":     mind_provider,
             "listener": listen_provider,
             "activity": lambda: self.controller.brain_activity(),
+            "memories": lambda: self.controller.memory_count(),
         })
 
         # Order matches the sidebar buttons exactly
@@ -137,8 +142,7 @@ class MainWindow(QMainWindow):
             PlaceholderPage("PLC"),                               # PLC
             PlaceholderPage("Vehicle"),                           # Vehicle
             ShopifyPage(provider=shopify_provider),               # Shopify
-            PlaceholderPage("Settings",
-                "Paths and agent settings live in config.py for now."),
+            SettingsPage(window_ref=self),                        # Settings
         ]
 
         for page in self.pages:
@@ -164,6 +168,29 @@ class MainWindow(QMainWindow):
 
         # floating live camera mini tab (hidden until needed)
         self.camera_panel = CameraPanel(central)
+        self.info_panels = {}   # panel_id -> InfoPanel, so repeat asks reuse it
+
+        # apply the saved theme + accent immediately
+        from ui.styles.theme_manager import ACCENTS, set_accent
+        set_accent(ACCENTS.get(user_settings.get("accent"), None))
+        self.apply_theme(user_settings.get("theme"))
+
+    def apply_theme(self, name: str):
+        """Switch the whole interface between dark and light. Sets the
+        active palette then asks every themed surface to restyle."""
+        from ui.styles.theme_manager import set_theme
+        set_theme(name)
+        if hasattr(self, "backdrop"):
+            self.backdrop.update()
+        for widget in (getattr(self, "sidebar", None),
+                       getattr(self, "header", None),
+                       getattr(self, "console", None),
+                       getattr(self, "footer", None)):
+            if widget is not None and hasattr(widget, "retheme"):
+                try:
+                    widget.retheme()
+                except Exception as e:
+                    print(f"[Theme] {type(widget).__name__}: {e}")
 
     # --------------------------------------------------
 
@@ -227,10 +254,22 @@ class MainWindow(QMainWindow):
             self.dashboard.set_idle
         )
 
+        # Live mic state → the listening pill only appears while
+        # JARVIS is actually capturing a command
+        if hasattr(self.controller, "listeningChanged") and \
+                hasattr(self.dashboard, "set_listening"):
+            self.controller.listeningChanged.connect(
+                self.dashboard.set_listening
+            )
+
         # Voice mute button ↔ controller (voice phrases sync the icon too)
 
         self.console.muteClicked.connect(
             self.controller.toggle_voice_mute
+        )
+
+        self.console.stopClicked.connect(
+            self.controller.stop_speaking
         )
 
         self.controller.voiceMuteChanged.connect(
@@ -242,6 +281,16 @@ class MainWindow(QMainWindow):
         self.controller.cameraPanel.connect(self._toggle_camera_panel)
 
         self.controller.progressReceived.connect(self._watch_for_camera_use)
+
+        self.controller.progressReceived.connect(self._watch_for_info_panel)
+
+        # Mini mode — JARVIS shrinks to a corner chat while he works
+        self.controller.progressReceived.connect(self._watch_for_mini_mode)
+        if hasattr(self.controller, "miniModeChanged"):
+            self.controller.miniModeChanged.connect(self.set_mini_mode)
+        if hasattr(self.console, "restoreClicked"):
+            self.console.restoreClicked.connect(
+                lambda: self.set_mini_mode(False))
 
         # Voice/mic startup diagnostics
         for note in getattr(self.controller, "startup_notes", []):
@@ -268,6 +317,118 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(2500, lambda: self._toggle_camera_panel(True))
 
+    def _watch_for_mini_mode(self, text):
+        t = str(text).strip()
+        if t == "→ mini_mode:on":
+            self.set_mini_mode(True)
+        elif t == "→ mini_mode:off":
+            self.set_mini_mode(False)
+
+    def set_mini_mode(self, on: bool):
+        """Shrink JARVIS to a floating, always-on-top chat box in the
+        BOTTOM-LEFT corner (so Shaun can watch him drive an app or the
+        browser and still talk to him), or restore the full interface."""
+        on = bool(on)
+        if on == getattr(self, "_mini_mode", False):
+            return
+        self._mini_mode = on
+        try:
+            if on:
+                self._mini_saved_geo = self.saveGeometry()
+                self._mini_was_max = self.isMaximized()
+                for w in (self.sidebar, self.header, self.footer,
+                          self.workspace):
+                    w.hide()
+                if self.console.collapsed:
+                    self.console.toggle_collapsed()
+                if hasattr(self.console, "mini_btn"):
+                    self.console.mini_btn.show()
+                self.showNormal()
+                self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+                self.show()
+                from PySide6.QtGui import QGuiApplication
+                scr = QGuiApplication.primaryScreen().availableGeometry()
+                w, h = 442, min(640, scr.height() - 60)
+                self.resize(w, h)
+                self.move(scr.left() + 10, scr.bottom() - h - 10)
+            else:
+                self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+                if hasattr(self.console, "mini_btn"):
+                    self.console.mini_btn.hide()
+                for w in (self.sidebar, self.header, self.footer,
+                          self.workspace):
+                    w.show()
+                self.show()
+                if getattr(self, "_mini_saved_geo", None):
+                    self.restoreGeometry(self._mini_saved_geo)
+                if getattr(self, "_mini_was_max", False):
+                    self.showMaximized()
+        except Exception as e:
+            print(f"[MiniMode] {e}")
+
+    def _watch_for_info_panel(self, text):
+        """JARVIS's mini-tab trigger — brain.py sends a marker like
+        '→ show_info:{json payload}' through the same progress channel
+        used for tool-activity markers. Parse it and pop/update a panel."""
+        raw = str(text)
+        prefix = "→ show_info:"
+        if not raw.startswith(prefix):
+            return
+        import json as _json
+        try:
+            payload = _json.loads(raw[len(prefix):])
+        except Exception:
+            return
+        self.show_info_panel(
+            payload.get("id", "info"),
+            payload.get("title", "JARVIS"),
+            payload.get("content", ""),
+            payload.get("kind", "text"),
+        )
+
+    def show_info_panel(self, panel_id: str, title: str, content: str,
+                        kind: str = "text"):
+        """Create or reuse a mini-tab. Repeat calls with the same
+        panel_id update the existing panel in place instead of
+        spawning a new one, so 'weather' panel just refreshes."""
+        panel = self.info_panels.get(panel_id)
+        if panel is None:
+            panel = InfoPanel(panel_id, self.centralWidget())
+            panel.on_close = self._update_brain_compact
+            self.info_panels[panel_id] = panel
+            self._place_info_panel(panel, is_new=True)
+        panel.set_content(title, content, kind)
+        panel.show()
+        panel.raise_()
+        if not panel.user_moved:
+            self._place_info_panel(panel, is_new=False)
+        self._update_brain_compact()
+
+    def _update_brain_compact(self):
+        """Shrink the brain to the corner while any panel is open."""
+        try:
+            any_open = any(pnl.isVisible()
+                           for pnl in self.info_panels.values())
+            if hasattr(self, "camera_panel") and self.camera_panel.isVisible():
+                any_open = True
+            core = getattr(self.dashboard, "core", None)
+            if core and hasattr(core, "set_compact"):
+                core.set_compact(any_open)
+        except Exception as e:
+            print(f"[Brain compact] {e}")
+
+    def _place_info_panel(self, panel, is_new: bool):
+        c = self.centralWidget()
+        if not c:
+            return
+        # cascade new panels so several can be open without exactly
+        # overlapping; index by creation order among open panels
+        idx = list(self.info_panels.values()).index(panel)
+        base_x = c.width() - panel.width() - 60
+        base_y = 140
+        offset = (idx % 5) * 32
+        panel.move(max(0, base_x - offset), base_y + offset)
+
     def _place_camera_panel(self):
 
         if self.camera_panel.user_moved:
@@ -287,6 +448,10 @@ class MainWindow(QMainWindow):
             self.backdrop.setGeometry(0, 0, c.width(), c.height())
         if hasattr(self, "camera_panel") and self.camera_panel.isVisible():
             self._place_camera_panel()
+        if hasattr(self, "info_panels"):
+            for panel in self.info_panels.values():
+                if panel.isVisible():
+                    panel._clamp_to_parent()
         super().resizeEvent(event)
 
     # --------------------------------------------------

@@ -136,7 +136,10 @@ class JarvisBrain:
         # Universal brain adapter — Claude first, free fallbacks
         # (Groq / Gemini / Ollama) when credits run out.
         _llm_mod = _load("_llm", os.path.join(_brain_dir, "llm.py"))
-        self.llm = _llm_mod.UniversalLLM(self.client)
+        _ct_mod  = _load("_ct", os.path.join(_brain_dir, "cost_tracker.py"))
+        self.cost_tracker = _ct_mod.CostTracker()
+        self.llm = _llm_mod.UniversalLLM(self.client,
+                                         cost_tracker=self.cost_tracker)
 
         self.conversation_history = []
         self.voice_callback       = voice_callback
@@ -151,6 +154,18 @@ class JarvisBrain:
         self.current_activity = "idle"
 
         self._continue_init(voice_callback, chat_callback)
+
+    # tools that put something ON SCREEN — the UI shrinks to the corner
+    # chat box so Shaun can watch JARVIS work and still talk to him
+    _MINI_TOOLS = {"open_app", "open_url", "open_in_vscode", "computer_use",
+                   "browser_goto", "google_search"}
+
+    def _request_mini(self):
+        if self.chat_callback:
+            try:
+                self.chat_callback("→ mini_mode:on")
+            except Exception:
+                pass
 
     def log_activity(self, action: str, detail: str = "", status: str = "ok"):
         with self._act_lock:
@@ -174,6 +189,102 @@ class JarvisBrain:
             lines.append(f"{e['time']} {mark} {e['action']}"
                          + (f" — {e['detail']}" if e["detail"] else ""))
         return "\n".join(lines)
+
+    # ── STORE-IN-A-BOX — a complete Shopify starter pack as text.
+    #    Works on ANY brain (Claude OR the free fallbacks) because it's
+    #    pure writing — no screen, no vision, no credits required. This
+    #    is the money-making half Shaun CAN have right now. ──
+    def build_store_plan(self, brief: str = "") -> str:
+        brief = (brief or "").strip() or \
+            "a low-budget online store to start in South Africa and make money fast"
+        if self.chat_callback:
+            self.chat_callback("→ build_store_plan")
+        self.current_activity = "building your store plan"
+        self.log_activity("build_store_plan", brief[:80])
+        sysp = ("You are a sharp, practical e-commerce strategist helping "
+                "Shaun Van Dyk, who is in South Africa (price everything in "
+                "ZAR / R), start a Shopify store on a TIGHT budget to make "
+                "real money quickly. Be specific and concrete — real product "
+                "names, real prices, real copy he can paste straight in. "
+                "No fluff, no 'consider researching' — give him the answers.")
+        try:
+            niche = self.llm.simple(sysp,
+                f"His idea/brief: {brief}\n\nChoose ONE focused, profitable "
+                f"niche he can start now. Give: the niche, why it sells in "
+                f"South Africa, who the target customer is, and 3 store-name "
+                f"ideas. Under 220 words.", max_tokens=600)
+            products = self.llm.simple(sysp,
+                f"Niche chosen:\n{niche}\n\nNow give 6 specific products to "
+                f"sell. For EACH: (1) product name, (2) suggested selling "
+                f"price in ZAR, (3) rough cost & where to source it "
+                f"(AliExpress / local supplier), (4) a punchy 2-sentence "
+                f"product description ready to paste into Shopify.",
+                max_tokens=1000)
+            launch = self.llm.simple(sysp,
+                f"For that store, write a numbered LAUNCH CHECKLIST to get it "
+                f"live and taking orders this week — Shopify signup, pick a "
+                f"free theme, set up South-African payments (e.g. "
+                f"Payfast/Yoco), load the products above, and 3 FREE ways to "
+                f"get the first sales. Concrete steps only.", max_tokens=700)
+        except Exception as e:
+            return (f"I couldn't reach any brain to write the plan, sir: {e}. "
+                    f"Even the free ones need a working internet key — type "
+                    f"'test brains' to see which are live.")
+
+        from datetime import datetime as _dt
+        stamp = _dt.now().strftime("%Y-%m-%d %H:%M")
+        md = (f"# Your Shopify Store Plan\n"
+              f"*Built by JARVIS — {stamp}*\n\n"
+              f"> Brief: {brief}\n\n"
+              f"---\n\n## 1. The Niche & Store Name\n\n{niche}\n\n"
+              f"---\n\n## 2. Products to Sell (with descriptions)\n\n{products}\n\n"
+              f"---\n\n## 3. Launch Checklist — live this week\n\n{launch}\n\n"
+              f"---\n\n## 4. How JARVIS runs it once it's live\n"
+              f"Once your store exists, create a **custom app** in Shopify "
+              f"admin (Settings → Apps and sales channels → Develop apps) with "
+              f"read_orders, read_products, read_fulfillments, "
+              f"write_fulfillments. Put the token in `keys.py` and I take over: "
+              f"auto-fulfilling orders, answering customer emails, and giving "
+              f"you a morning 'how's Shopify doing' report — all on autopilot.\n")
+        try:
+            d = config.ROOT_DIR / "store_plans"
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / f"store_plan_{_dt.now().strftime('%Y%m%d_%H%M%S')}.md"
+            path.write_text(md, encoding="utf-8")
+            if self.pc:
+                self.pc.open_anything(str(path))
+            self.show_panel("store_plan", "YOUR STORE PLAN", md)
+            where = str(path)
+        except Exception as e:
+            where = f"(couldn't save the file: {e})"
+        return (f"Done, sir — I've built your complete store plan and opened "
+                f"it. It's got the niche, 6 products with prices and "
+                f"descriptions, and a step-by-step launch checklist. Saved to "
+                f"{where}. This is the money-making groundwork — the part I "
+                f"CAN do without credits. You handle the 5-minute Shopify "
+                f"signup (it needs a real person + card), then I run the store "
+                f"from there.")
+
+    # ── the mini-tab — pop information up as a movable, resizable
+    #    floating panel in the UI instead of only burying it in chat ──
+    def show_panel(self, panel_id: str, title: str, content: str,
+                   kind: str = "text"):
+        if not self.chat_callback:
+            return
+        try:
+            from core import settings as _settings
+            if not _settings.get("mini_tabs", True):
+                return                    # Shaun turned pop-ups off
+        except Exception:
+            pass
+        import json as _json
+        try:
+            self.chat_callback("→ show_info:" + _json.dumps({
+                "id": panel_id, "title": title,
+                "content": str(content)[:8000], "kind": kind,
+            }))
+        except Exception as e:
+            print(f"[Brain] show_panel failed: {e}")
 
     def _continue_init(self, voice_callback, chat_callback):
 
@@ -214,6 +325,37 @@ class JarvisBrain:
                 print("[Brain] PC control online.")
             except Exception as e:
                 print(f"PC control error: {e}")
+
+        # Computer agent — JARVIS's HANDS AND EYES. Moves the real cursor,
+        # clicks, types, and verifies each action against a fresh
+        # screenshot. This is what lets him operate the PC like a person.
+        self.hands = None
+        if self.pc is not None and self.client is not None:
+            try:
+                _ca_mod = _load("_computer_agent",
+                                os.path.join(_brain_dir, "computer_agent.py"))
+                self.hands = _ca_mod.ComputerAgent(
+                    client=self.client,
+                    pc=self.pc,
+                    cost_tracker=self.cost_tracker,
+                    on_status=chat_callback,
+                )
+                print("[Brain] Computer agent (hands + eyes) online.")
+            except Exception as e:
+                print(f"Computer agent error: {e}")
+
+        # Browser agent — REAL clicking/typing/navigation via Playwright.
+        # Lazy: the Chromium window only opens on first browser tool use.
+        self.browser = None
+        try:
+            from agents.browser_agent import BrowserAgent
+            self.browser = BrowserAgent(
+                on_status=chat_callback,
+                screenshots_dir=config.SCREENSHOTS_DIR,
+                profile_dir=config.MEMORY_DIR / "browser_profile")
+            print("[Brain] Browser agent online (starts on first use).")
+        except Exception as e:
+            print(f"Browser agent error: {e}")
 
         # Self-edit agent — repo_root should be the folder containing your
         # git repo (the parent of jarvis_v18, or wherever your .git lives)
@@ -277,6 +419,23 @@ class JarvisBrain:
         except Exception as e:
             print(f"Agent manager error: {e}")
 
+        # Guardian — the early-warning watchdog. Watches money, brain
+        # health, this machine, and the projects (trading, Shopify,
+        # pending self-edits) and warns Shaun BEFORE trouble bites.
+        self.guardian = None
+        try:
+            _gd_mod = _load("_guardian",
+                            os.path.join(_brain_dir, "guardian.py"))
+            self.guardian = _gd_mod.Guardian(
+                self,
+                chat_callback=chat_callback,
+                voice_callback=voice_callback,
+            )
+            self.guardian.start()
+            print("[Brain] Guardian online.")
+        except Exception as e:
+            print(f"Guardian error: {e}")
+
         self._load_session()
         print("[Brain] JarvisBrain ready.")
 
@@ -338,11 +497,40 @@ class JarvisBrain:
         if any(x in lower for x in ["what day","what date","what's today","whats today"]):
             return "Today is " + datetime.now().strftime("%A, %d %B %Y") + ", sir."
 
+        # ── SHOPIFY STATUS — "how is Shopify doing" answered DIRECTLY
+        #    from the store API. No LLM, no vision, no credits needed —
+        #    works even when Claude is broke and we're on a free brain. ──
+        if self.agent_manager and any(x in lower for x in [
+                "how is shopify", "how's shopify", "hows shopify",
+                "how is the store", "how's the store", "hows the store",
+                "how is my store", "shopify report", "shopify status",
+                "how is the shop", "how's business", "store doing",
+                "shopify doing", "check shopify", "check the store"]):
+            s = self.agent_manager.get("shopify")
+            if s:
+                report = s.full_report()
+                self.show_panel("shopify", "SHOPIFY", report)
+                self.log_activity("shopify_report", "full", status="ok")
+                return report
+
+        # ── STORE PLAN — build a full Shopify starter pack (ANY brain,
+        #    no vision/credits needed; it's pure writing) ──
+        if any(x in lower for x in [
+                "build store plan", "store plan", "build my store",
+                "create store plan", "shopify plan", "store in a box",
+                "starter pack", "store starter"]):
+            brief = text
+            for p in ("build store plan", "create store plan", "store plan",
+                      "build my store", "shopify plan", "store in a box",
+                      "starter pack", "store starter"):
+                brief = re.sub(p, "", brief, flags=re.IGNORECASE)
+            return self.build_store_plan(brief.strip())
+
         # ── SYSTEM STATUS (explicit phrases only) ─
         if any(x in lower for x in ["system status","system report","system info",
                                      "pc status","how is the pc","how's the pc"]):
             s = self.system.state
-            return (
+            report = (
                 f"CPU Usage: {s.get('cpu')}%\n"
                 f"RAM Usage: {s.get('ram')}%\n"
                 f"Disk Usage: {s.get('disk')}%\n"
@@ -351,6 +539,8 @@ class JarvisBrain:
                 f"User: {s.get('username')}\n"
                 f"Operating System: {s.get('platform')} {s.get('platform_release')}"
             )
+            self.show_panel("system_status", "SYSTEM STATUS", report)
+            return report
 
         # ── PC CONTROL ──────────────────────────
         # Phrases are anchored or word-bounded so ordinary conversation
@@ -378,9 +568,11 @@ class JarvisBrain:
                 return self.pc.type_text(text[5:].strip())
             if lower.startswith("open url ") or lower.startswith("go to "):
                 url = text.replace("open url","").replace("go to","").strip()
+                self._request_mini()
                 return self.pc.open_url(url)
             if lower.startswith("google ") or lower.startswith("search google for "):
                 query = lower.replace("search google for","").replace("google","",1).strip()
+                self._request_mini()
                 return self.pc.google_search(query)
             if "volume up" in lower:
                 return self.pc.volume_up()
@@ -389,11 +581,17 @@ class JarvisBrain:
             if re.search(r"\bmute\b", lower) or "silence the pc" in lower:
                 return self.pc.mute()
             if lower.startswith("screenshot") or "take a screenshot" in lower:
-                return self.pc.screenshot()
+                result = self.pc.screenshot()
+                if self.pc.last_screenshot:
+                    self.show_panel("screenshot", "SCREENSHOT",
+                                    self.pc.last_screenshot, kind="image")
+                return result
             if lower.startswith("find file "):
                 return self.pc.search_files(lower.replace("find file","").strip())
             if any(x in lower for x in ["what's running","list processes","whats running"]):
-                return self.pc.list_processes()
+                result = self.pc.list_processes()
+                self.show_panel("processes", "RUNNING PROCESSES", result)
+                return result
             if lower.startswith("run command "):
                 return self.pc.run_command(text[12:].strip())
             if lower.startswith("copy to clipboard "):
@@ -444,6 +642,7 @@ class JarvisBrain:
         if self.pc and not compound and lower.startswith("open "):
             target = text[5:].strip()
             if len(target.split()) <= 4 and " into " not in target.lower():
+                self._request_mini()
                 return self.pc.open_anything(target)
 
         # ── MEMORY ──────────────────────────────
@@ -461,7 +660,9 @@ class JarvisBrain:
 
         if any(x in lower for x in ["show memories","what do you remember","show facts","list memories"]):
             facts = self.memory.get_all()
-            return "\n".join(facts) if facts else "Memory banks are empty, sir."
+            result = "\n".join(facts) if facts else "Memory banks are empty, sir."
+            self.show_panel("memory", "PERMANENT MEMORY", result)
+            return result
 
         # ── RESEARCH AGENT ──────────────────────
         if self.research_agent:
@@ -515,7 +716,9 @@ class JarvisBrain:
         if self.researcher:
             if any(x in lower for x in ["what have you studied","list your knowledge",
                                          "show knowledge","list topics","what topics do you know"]):
-                return self.researcher.list_topics()
+                result = self.researcher.list_topics()
+                self.show_panel("knowledge", "KNOWLEDGE BASE", result)
+                return result
 
             if any(lower.startswith(x) for x in ["what do you know about",
                                                     "tell me what you know about","recall "]):
@@ -524,6 +727,7 @@ class JarvisBrain:
                     topic = topic.replace(p,"").strip()
                 result = self.researcher.recall(topic)
                 if result:
+                    self.show_panel("knowledge", topic.upper() or "KNOWLEDGE", result)
                     return result
                 return f"I have not studied '{topic}' yet, sir. Say 'study {topic}' to begin."
 
@@ -550,7 +754,9 @@ class JarvisBrain:
             if lower.startswith("delete task "):
                 return self.tasks.delete(text[12:].strip())
             if any(x in lower for x in ["show tasks","my tasks","list tasks","what are my tasks"]):
-                return self.tasks.list_pending()
+                result = self.tasks.list_pending()
+                self.show_panel("tasks", "TASKS", result)
+                return result
             if lower.startswith("remind me in "):
                 try:
                     parts = text[13:].split(" ",2)
@@ -567,17 +773,32 @@ class JarvisBrain:
         # ── BRAIN PROVIDER STATUS / TEST ────────
         if any(x in lower for x in ["brain status", "provider status",
                                      "which brain", "llm status"]):
-            return self.llm.provider_status()
+            result = self.llm.provider_status()
+            self.show_panel("brain_status", "BRAIN PROVIDERS", result)
+            return result
         if any(x in lower for x in ["test brains", "brain test",
                                      "test the brains", "test providers"]):
-            return self.llm.provider_test()
+            result = self.llm.provider_test()
+            self.show_panel("brain_status", "BRAIN TEST", result)
+            return result
 
-        # ── ACTIVITY / "what are you busy with" ─
+        # ── COST / SPEND ─────────────────────────
+        if any(x in lower for x in ["cost report", "spend report",
+                                     "how much have you cost",
+                                     "how much have i spent",
+                                     "what have you cost me",
+                                     "api cost", "api spend",
+                                     "token cost", "usage cost"]):
+            result = self.cost_tracker.report()
+            self.show_panel("cost_report", "COST REPORT", result)
+            return result
         if any(x in lower for x in ["what are you busy with", "what are you doing",
                                      "what are you working on", "show activity",
                                      "activity log", "work log", "current task",
                                      "what have you done"]):
-            return self.activity_report()
+            result = self.activity_report()
+            self.show_panel("activity", "ACTIVITY LOG", result)
+            return result
 
         # ── CAMERA / EYES ───────────────────────
         if CAMERA_OK and any(x in lower for x in [
@@ -593,16 +814,27 @@ class JarvisBrain:
         if self.agent_manager:
             if any(x in lower for x in ["agent status","agents status","agent report",
                                          "how are the agents","show agents"]):
-                return self.agent_manager.status_text()
+                result = self.agent_manager.status_text()
+                self.show_panel("agents", "AGENT STATUS", result)
+                return result
             if any(x in lower for x in ["portfolio","paper portfolio","trading status"]):
                 t = self.agent_manager.get("trading")
-                if t: return t.portfolio_report()
+                if t:
+                    result = t.portfolio_report()
+                    self.show_panel("trading", "TRADING PORTFOLIO", result)
+                    return result
             if lower in ("prices","crypto prices","market prices"):
                 t = self.agent_manager.get("trading")
-                if t: return t.price_report()
+                if t:
+                    result = t.price_report()
+                    self.show_panel("trading", "MARKET PRICES", result)
+                    return result
             if any(x in lower for x in ["shopify status","store status","sales today","shopify report"]):
                 s = self.agent_manager.get("shopify")
-                if s: return s.sales_today()
+                if s:
+                    result = s.sales_today()
+                    self.show_panel("shopify", "SHOPIFY", result)
+                    return result
 
         # ── OBSIDIAN STATUS ─────────────────────
         if any(x in lower for x in ["vault status","obsidian status"]):
@@ -616,7 +848,9 @@ class JarvisBrain:
         if "weather" in lower:
             if self.web:
                 city = config.HOME_CITY.split(",")[0]
-                return f"Weather in {city}: " + self.web.weather(config.HOME_CITY)
+                result = f"Weather in {city}: " + self.web.weather(config.HOME_CITY)
+                self.show_panel("weather", f"WEATHER — {city.upper()}", result)
+                return result
             return "Web not available, sir."
 
         if any(x in lower for x in ["latest news","news today","what's happening","whats happening"]):
@@ -624,7 +858,9 @@ class JarvisBrain:
                 topic = lower
                 for p in ["latest news","news today","what's happening","whats happening"]:
                     topic = topic.replace(p,"").strip()
-                return self.web.news(topic)
+                result = self.web.news(topic)
+                self.show_panel("news", f"NEWS — {topic.upper() or 'TODAY'}", result)
+                return result
 
         # ── CLAUDE WITH TOOLS ───────────────────
         # Everything else goes to Claude, who can chain real actions
@@ -638,6 +874,26 @@ class JarvisBrain:
 
     def _tool_definitions(self):
         return [
+            {"name": "computer_use",
+             "description": "Take control of the PC like a person: look at the "
+                            "screen, MOVE THE REAL MOUSE CURSOR, click buttons, "
+                            "type, press keys, scroll — verifying each step with "
+                            "fresh screenshots until the task is done. Use for "
+                            "ANY on-screen task the other tools can't do "
+                            "directly: operating an app's interface, clicking "
+                            "through menus/dialogs/wizards, filling desktop "
+                            "forms, arranging windows, anything requiring "
+                            "hand-eye work. Describe the FULL task including "
+                            "how to know it's finished. Takes a while; each "
+                            "step is narrated live.",
+             "input_schema": {"type": "object", "properties": {
+                 "task": {"type": "string",
+                          "description": "Complete task, e.g. 'Open Spotify, "
+                                         "search for Hans Zimmer, play the "
+                                         "top result'"},
+                 "max_steps": {"type": "integer",
+                               "description": "Action budget, default 25"}},
+                 "required": ["task"]}},
             {"name": "open_app",
              "description": "Open an application, file, folder or anything else on the PC by name or path. Examples: 'chrome', 'calculator', 'C:\\jarvis'.",
              "input_schema": {"type": "object", "properties": {
@@ -739,6 +995,14 @@ class JarvisBrain:
             {"name": "activity_report",
              "description": "The verified ledger of actions actually taken this session (tool executions with success/fail). Use when Shaun asks what you are busy with or what you have done — answer from THIS, never from memory or imagination.",
              "input_schema": {"type": "object", "properties": {}}},
+            {"name": "build_store_plan",
+             "description": "Write Shaun a COMPLETE Shopify store starter pack (niche, 6 products with ZAR prices + descriptions, and a launch checklist) as a saved document. Works even with no API credits and no screen — it's pure writing. Use whenever he wants to create/start/build a store or make money with Shopify. Pass his idea/interest/budget as the brief.",
+             "input_schema": {"type": "object", "properties": {
+                 "brief": {"type": "string", "description": "His idea, interest, niche or budget (optional)"}},
+                 "required": []}},
+            {"name": "guardian_report",
+             "description": "The Guardian's early-warning log: recent danger warnings (low credits, backup brain, RAM/disk trouble, failing tools, trading losses, Shopify errors) or the all-clear. Use when Shaun asks about warnings, dangers, risks, or whether everything is okay.",
+             "input_schema": {"type": "object", "properties": {}}},
             {"name": "read_file",
              "description": "Read a text/code file from disk and return its contents (up to ~20k chars).",
              "input_schema": {"type": "object", "properties": {
@@ -769,15 +1033,71 @@ class JarvisBrain:
                  "action": {"type": "string", "enum": ["start", "stop"]}},
                  "required": ["agent", "action"]}},
             {"name": "shopify_report",
-             "description": "Shopify store report: today's sales, recent orders, or low stock.",
+             "description": "Shopify store report. Use kind='full' whenever Shaun asks how Shopify/the store/business is doing — it covers sales today & yesterday, fulfilment backlog, customer emails waiting, stock, and every autopilot action of the last 24h. The other kinds are for narrow follow-ups.",
              "input_schema": {"type": "object", "properties": {
-                 "kind": {"type": "string", "enum": ["sales_today", "recent_orders", "low_stock"]}},
+                 "kind": {"type": "string", "enum": ["full", "sales_today", "recent_orders", "low_stock"]}},
                  "required": ["kind"]}},
+            {"name": "shopify_replies",
+             "description": "Manage the autopilot's drafted customer-email replies: list what's waiting, approve one to SEND it, or reject one to discard it. Use when Shaun says things like 'show shopify replies', 'approve reply 2', 'don't send that'.",
+             "input_schema": {"type": "object", "properties": {
+                 "action": {"type": "string", "enum": ["list", "approve", "reject"]},
+                 "n": {"type": "integer", "description": "Reply number (for approve/reject)"}},
+                 "required": ["action"]}},
             {"name": "trading_portfolio",
              "description": "Current paper-trading portfolio with value and profit/loss.",
              "input_schema": {"type": "object", "properties": {}}},
             {"name": "market_prices",
              "description": "Latest crypto prices being watched (Luno, in ZAR).",
+             "input_schema": {"type": "object", "properties": {}}},
+            {"name": "draw_image",
+             "description": "Generate an actual image/drawing/artwork from a text description and show it to Shaun in a pop-up panel. Use whenever Shaun asks you to draw, paint, design, illustrate, or create a picture/logo/artwork of anything. Write a rich, detailed visual prompt (style, colours, composition, mood) — the more detail the better the result.",
+             "input_schema": {"type": "object", "properties": {
+                 "prompt": {"type": "string", "description": "Detailed visual description of the image to create"},
+                 "name": {"type": "string", "description": "Short filename-safe label, e.g. 'sunset_dragon'"}},
+                 "required": ["prompt"]}},
+            {"name": "build_website",
+             "description": "Build a complete, ready-to-open website as a single self-contained HTML file (inline CSS + JS, no external build step) and save it to disk, then open it in the browser. Use for landing pages, portfolios, shops, business sites. Write real, polished, modern markup — not a placeholder. Describe what you built when done.",
+             "input_schema": {"type": "object", "properties": {
+                 "name": {"type": "string", "description": "Site/folder name, filename-safe e.g. 'coffee_shop'"},
+                 "html": {"type": "string", "description": "The COMPLETE HTML document including <!DOCTYPE html>, inline <style> and <script>. Make it genuinely good."}},
+                 "required": ["name", "html"]}},
+            {"name": "cost_report",
+             "description": "Real Anthropic API spend report — session, today, this month, and all time — from actual token usage, never estimated. Use when Shaun asks what he's spending or what something is costing.",
+             "input_schema": {"type": "object", "properties": {}}},
+            {"name": "show_info",
+             "description": "Pop a movable, resizable mini-tab panel onto Shaun's screen with information — like JARVIS's holographic displays in Iron Man. Use this whenever you retrieve or compose information Shaun would want to actually LOOK at rather than just hear read out: search results, a summary, a comparison, a plan, a list, anything reference-worthy. Give it a short stable id so repeat requests on the same topic update the same panel instead of piling up new ones (e.g. id='weather' every time, not a new id per call).",
+             "input_schema": {"type": "object", "properties": {
+                 "id": {"type": "string", "description": "Short stable identifier, e.g. 'weather', 'shopify_orders', 'research_summary'"},
+                 "title": {"type": "string", "description": "Short panel title shown in the tab"},
+                 "content": {"type": "string", "description": "The information to display"}},
+                 "required": ["id", "title", "content"]}},
+            {"name": "browser_goto",
+             "description": "Open a URL in JARVIS's OWN controlled browser window (visible to Shaun). This is the browser YOU can click and type in — use it for any web task like Shopify, signups, forms. Returns the page title.",
+             "input_schema": {"type": "object", "properties": {
+                 "url": {"type": "string"}}, "required": ["url"]}},
+            {"name": "browser_read",
+             "description": "Read the current page in the controlled browser: URL, title, all visible inputs/buttons/links, and the page text. ALWAYS call this after goto/click before deciding the next action — act on what is really there, never guess.",
+             "input_schema": {"type": "object", "properties": {}}},
+            {"name": "browser_click",
+             "description": "Click a button or link in the controlled browser by its visible text (e.g. 'Start free trial') or a CSS selector.",
+             "input_schema": {"type": "object", "properties": {
+                 "target": {"type": "string", "description": "Visible text or CSS selector"}},
+                 "required": ["target"]}},
+            {"name": "browser_fill",
+             "description": "Type a value into an input in the controlled browser, found by placeholder/label/name/CSS. SENSITIVE fields (passwords, cards, ID numbers, OTP) are auto-refused — ask Shaun to type those himself in the window, wait for 'done', then continue.",
+             "input_schema": {"type": "object", "properties": {
+                 "field": {"type": "string", "description": "Placeholder, label, name or CSS of the input"},
+                 "value": {"type": "string"}},
+                 "required": ["field", "value"]}},
+            {"name": "browser_press",
+             "description": "Press a keyboard key in the controlled browser (e.g. 'Enter', 'Tab').",
+             "input_schema": {"type": "object", "properties": {
+                 "key": {"type": "string"}}, "required": ["key"]}},
+            {"name": "browser_screenshot",
+             "description": "Screenshot the controlled browser page.",
+             "input_schema": {"type": "object", "properties": {}}},
+            {"name": "browser_close",
+             "description": "Close the controlled browser window.",
              "input_schema": {"type": "object", "properties": {}}},
             {"name": "paper_trade",
              "description": "Execute a PAPER trade (pretend money, real prices). Pairs like XBTZAR, ETHZAR. For buys give amount_zar; for sells units is optional (defaults to whole position).",
@@ -789,11 +1109,30 @@ class JarvisBrain:
                  "required": ["action", "pair"]}},
         ]
 
-    # tools kept when a free brain (tight token budget) is answering
+    # tools kept when a free brain (tight token budget) is answering.
+    # NOTE: computer_use, browser_*, camera_look and draw_image are
+    # DELIBERATELY excluded — the free brains have no vision and can't
+    # drive the screen/browser. Giving them these tools made Groq
+    # NARRATE fake clicks ("store created!") instead of admitting it
+    # couldn't. Without the tools, the fallback guard tells the truth.
     _CORE_TOOLS = {"open_app", "open_url", "open_in_vscode", "run_command",
                    "pc_power", "set_volume", "take_screenshot", "web_search",
                    "get_weather", "remember_fact", "add_task", "list_tasks",
-                   "camera_look", "trading_portfolio", "activity_report"}
+                   "trading_portfolio", "activity_report", "cost_report",
+                   "build_store_plan",
+                   # pure-API store tools — no vision needed, so the free
+                   # brains can run them too (report on the store, manage
+                   # customer replies) even with Claude out of credits
+                   "shopify_report", "shopify_replies"}
+
+    # tasks that genuinely NEED the main Claude brain (vision + real
+    # browser/screen control). If a fallback brain is answering one of
+    # these, be honest instead of improvising.
+    _NEEDS_CLAUDE = re.compile(
+        r"\b(shopify|store|browser|website|log ?in|sign ?in|sign ?up|"
+        r"screen|click|navigate|fill in|checkout|dashboard|admin|"
+        r"add product|set ?up (my|the|a) |create (an? )?account)\b",
+        re.IGNORECASE)
 
     def _compact_tools(self):
         slim = []
@@ -807,6 +1146,13 @@ class JarvisBrain:
     def _execute_tool(self, name, args):
         try:
             pc = self.pc
+            if name == "computer_use":
+                if not self.hands:
+                    return ("Hands offline, sir — needs pyautogui and the "
+                            "Anthropic key (vision brain).")
+                self.current_activity = f"operating screen: {args['task'][:50]}"
+                return self.hands.run(args["task"],
+                                      max_steps=int(args.get("max_steps", 25)))
             if name == "open_app":
                 return pc.open_anything(args["name"]) if pc else "PC control offline."
             if name == "open_in_vscode":
@@ -877,6 +1223,12 @@ class JarvisBrain:
                 return self.researcher.recall(args["topic"]) or "Nothing studied on that topic yet."
             if name == "activity_report":
                 return self.activity_report()
+            if name == "guardian_report":
+                if not self.guardian:
+                    return "Guardian offline."
+                return self.guardian.report()
+            if name == "build_store_plan":
+                return self.build_store_plan(args.get("brief", ""))
             if name == "read_file":
                 path = args["path"]
                 try:
@@ -932,10 +1284,19 @@ class JarvisBrain:
             if name == "agent_control":
                 if not self.agent_manager: return "Agents offline."
                 return self.agent_manager.control(args["agent"], args["action"])
+            if name == "shopify_replies":
+                mgr = self.agent_manager
+                s = mgr.get("shopify") if mgr else None
+                if not s: return "Shopify agent offline."
+                a = args.get("action", "list")
+                if a == "approve": return s.approve_reply(args.get("n", 0))
+                if a == "reject":  return s.reject_reply(args.get("n", 0))
+                return s.pending_replies()
             if name == "shopify_report":
                 s = self.agent_manager.get("shopify") if self.agent_manager else None
                 if not s: return "Shopify agent offline."
                 kind = args["kind"]
+                if kind == "full":          return s.full_report()
                 if kind == "sales_today":   return s.sales_today()
                 if kind == "recent_orders": return s.recent_orders()
                 return s.low_stock_report()
@@ -945,6 +1306,70 @@ class JarvisBrain:
             if name == "market_prices":
                 t = self.agent_manager.get("trading") if self.agent_manager else None
                 return t.price_report() if t else "Trading agent offline."
+            if name == "draw_image":
+                import re as _re
+                label = args.get("name") or "drawing"
+                safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", label)[:40]
+                from datetime import datetime as _dt
+                out = str(config.SCREENSHOTS_DIR /
+                          f"art_{safe}_{_dt.now().strftime('%H%M%S')}.png")
+                if self.chat_callback:
+                    self.chat_callback("(drawing — this can take a moment…)")
+                try:
+                    path = self.llm.generate_image(args["prompt"], out)
+                except Exception as e:
+                    return f"Drawing FAILED: {e}"
+                self.show_panel("drawing", f"DRAWING — {label}", path,
+                                kind="image")
+                return (f"Done — I've drawn it and put it on screen. "
+                        f"Saved to {path}.")
+            if name == "build_website":
+                import re as _re
+                label = args.get("name") or "site"
+                safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", label)[:40] or "site"
+                site_dir = config.ROOT_DIR / "websites" / safe
+                try:
+                    site_dir.mkdir(parents=True, exist_ok=True)
+                    index = site_dir / "index.html"
+                    index.write_text(args["html"], encoding="utf-8")
+                    if self.pc:
+                        self.pc.open_url(index.as_uri())
+                    return (f"Website built and opened in the browser. "
+                            f"Saved to {index}. VERIFIED: "
+                            f"{index.stat().st_size} bytes written.")
+                except Exception as e:
+                    return f"Website build FAILED: {e}"
+            if name == "cost_report":
+                return self.cost_tracker.report()
+            if name == "show_info":
+                self.show_panel(args.get("id", "info"),
+                                args.get("title", "JARVIS"),
+                                args.get("content", ""))
+                return "Panel displayed on screen."
+            if name.startswith("browser_"):
+                if not self.browser:
+                    return ("Browser agent offline — install with the venv "
+                            "pip: pip install playwright && "
+                            "playwright install chromium")
+                try:
+                    if name == "browser_goto":
+                        return self.browser.goto(args["url"])
+                    if name == "browser_read":
+                        return self.browser.read_page()
+                    if name == "browser_click":
+                        return self.browser.click(args["target"])
+                    if name == "browser_fill":
+                        return self.browser.fill(args["field"], args["value"])
+                    if name == "browser_press":
+                        return self.browser.press(args["key"])
+                    if name == "browser_screenshot":
+                        return self.browser.screenshot()
+                    if name == "browser_close":
+                        return self.browser.close()
+                except RuntimeError as e:
+                    return str(e)
+                except Exception as e:
+                    return f"Browser action FAILED: {e}"
             if name == "paper_trade":
                 t = self.agent_manager.get("trading") if self.agent_manager else None
                 if not t: return "Trading agent offline."
@@ -996,17 +1421,41 @@ class JarvisBrain:
                                "text": f"(could not read {path}: {e})"})
         return blocks
 
+    # heavy work → Sonnet (SMART); everything else → Haiku (FAST, cheap)
+    _SMART_HINTS = ("code", "coding", "python", "script", "debug", "error",
+                    "fix", "bug", "refactor", "build", "write a", "create a",
+                    "rewrite", "analyse", "analyze", "research", "browser",
+                    "shopify", "sign up", "signup", "website", "edit yourself",
+                    "self edit", "your source", "your code", "file",
+                    "draw", "design", "logo", "site", "landing page")
+
+    def _needs_smart_brain(self, text: str, files=None) -> bool:
+        try:
+            from core import settings as _settings
+            if _settings.get("brain_mode") == "smart":
+                return True               # Shaun chose Always Smart
+        except Exception:
+            pass
+        if files:
+            return True                       # attachments deserve the big brain
+        low = (text or "").lower()
+        if len(low) > 400:
+            return True                       # long/complex requests
+        return any(h in low for h in self._SMART_HINTS)
+
     def _chat_with_tools(self, text: str, files=None) -> str:
         if files:
             content = self._file_blocks(files) + [{"type": "text", "text": text}]
             self.conversation_history.append({"role": "user", "content": content})
         else:
             self.conversation_history.append({"role": "user", "content": text})
-        if len(self.conversation_history) > 12:
-            self.conversation_history = self.conversation_history[-12:]
+        if len(self.conversation_history) > 24:
+            self.conversation_history = self.conversation_history[-24:]
 
         try:
             def _exec_logged(name, targs):
+                if name in self._MINI_TOOLS:
+                    self._request_mini()
                 if self.chat_callback:
                     self.chat_callback(f"→ {name}")
                 args_hint = ", ".join(
@@ -1019,6 +1468,45 @@ class JarvisBrain:
                               "offline", "unavailable"))
                 self.log_activity(name, args_hint or out_s[:80],
                                   status="fail" if failed else "ok")
+                # Iron-Man mini-tabs: info retrieved by tools pops up on
+                # screen automatically, not only buried in the chat log
+                if not failed:
+                    try:
+                        if name == "take_screenshot" and self.pc \
+                                and self.pc.last_screenshot:
+                            self.show_panel("screenshot", "SCREENSHOT",
+                                            self.pc.last_screenshot,
+                                            kind="image")
+                        elif name == "browser_screenshot" and self.browser \
+                                and self.browser.last_screenshot:
+                            self.show_panel("browser", "BROWSER VIEW",
+                                            self.browser.last_screenshot,
+                                            kind="image")
+                        elif name in ("web_search", "get_weather",
+                                      "list_tasks", "activity_report",
+                                      "cost_report", "recall_knowledge",
+                                      "list_processes", "get_system_info",
+                                      "trading_portfolio", "market_prices",
+                                      "shopify_report", "agents_status",
+                                      "list_directory", "search_files"):
+                            titles = {"web_search": "SEARCH RESULTS",
+                                      "get_weather": "WEATHER",
+                                      "list_tasks": "TASKS",
+                                      "activity_report": "ACTIVITY LOG",
+                                      "cost_report": "COST REPORT",
+                                      "recall_knowledge": "KNOWLEDGE",
+                                      "list_processes": "PROCESSES",
+                                      "get_system_info": "SYSTEM",
+                                      "trading_portfolio": "PORTFOLIO",
+                                      "market_prices": "PRICES",
+                                      "shopify_report": "SHOPIFY",
+                                      "agents_status": "AGENTS",
+                                      "list_directory": "FILES",
+                                      "search_files": "FILE SEARCH"}
+                            self.show_panel(name, titles.get(name, name.upper()),
+                                            out_s)
+                    except Exception as e:
+                        print(f"[Brain] auto-panel failed: {e}")
                 return out
 
             user_content = self.conversation_history[-1]["content"]
@@ -1030,9 +1518,14 @@ class JarvisBrain:
                 tools=self._tool_definitions(),
                 execute=_exec_logged,
                 on_text=self.chat_callback,
+                # real work (browser flows, multi-app tasks) takes far
+                # more than 10 actions — 28 keeps him going to the END
+                # of a task instead of stopping halfway through a login
+                max_rounds=28,
                 compact_system=self.system_prompt(context_for=text,
                                                   compact=True),
                 compact_tools=self._compact_tools(),
+                smart=self._needs_smart_brain(text, files),
             )
 
             if res.get("provider") is None:
@@ -1056,13 +1549,65 @@ class JarvisBrain:
                                  "AIza) and update C:\\jarvis\\keys.py.")
                 return "\n".join(lines)
 
-            if self.llm.active_provider and self.llm.active_provider != "anthropic":
+            on_fallback = (self.llm.active_provider
+                           and self.llm.active_provider != "anthropic")
+            if on_fallback:
                 # let Shaun know quietly which brain answered
                 if self.chat_callback:
                     self.chat_callback(
                         f"(fallback brain: {self.llm.active_provider})")
 
             reply_text = res.get("text", "")
+
+            # FALLBACK HONESTY — a free brain (no vision, no browser tools)
+            # answered a task that NEEDS the real Claude brain. Whatever it
+            # said about clicking/creating/setting-up is fiction. Replace
+            # it with the plain truth instead of letting it improvise.
+            # only a genuine screen/browser tool counts as "did the real
+            # thing". Pure-API tools (shopify_report, web_search, etc.) DO
+            # produce real answers on a free brain, so if ANY tool ran we
+            # trust the reply. The guard fires only on pure narration —
+            # zero tools — which is exactly what fabrication looks like.
+            ran_a_tool = bool(res.get("tools_used"))
+            if (on_fallback and not ran_a_tool
+                    and self._NEEDS_CLAUDE.search(text)):
+                self.log_activity("fallback_guard",
+                                  "screen task on free brain — no faking",
+                                  status="fail")
+                # If he wants to BUILD/CREATE a store, don't dead-end — give
+                # him the thing that actually makes money and needs no
+                # vision: the full written store plan.
+                if re.search(r"\b(store|shop|shopify|business)\b", text, re.I) \
+                        and re.search(r"\b(create|build|make|set ?up|start|"
+                                      r"launch|open)\b", text, re.I):
+                    note = ("I can't click through the Shopify signup without "
+                            "Claude credits (the backup brain has no eyes), "
+                            "and Shopify needs a real person + card to open the "
+                            "account anyway. But here's what actually makes the "
+                            "money — I'll write your whole store right now, "
+                            "free:\n\n")
+                    return note + self.build_store_plan(text)
+                bal = ""
+                try:
+                    if self.cost_tracker and hasattr(self.cost_tracker,
+                                                     "remaining_balance"):
+                        left = self.cost_tracker.remaining_balance()
+                        if left is not None:
+                            bal = f" (${left:.2f} left)"
+                except Exception:
+                    pass
+                reply = (
+                    f"Straight with you, sir: I'm on the backup brain "
+                    f"({self.llm.active_provider}) — Claude's credits are "
+                    f"out{bal}, so I have no eyes and can't drive the browser, "
+                    f"and I won't pretend I did. Two things I CAN still do free: "
+                    f"say 'build store plan' and I'll write your entire Shopify "
+                    f"store (niche, products, prices, copy, launch steps); or "
+                    f"top up at console.anthropic.com/settings/billing and I'll "
+                    f"click through it all for real.")
+                self.conversation_history.append(
+                    {"role": "assistant", "content": reply})
+                return reply
             # Never claim success we didn't earn. If the round budget ran
             # out mid-plan, say exactly what happened instead of "Done".
             if res.get("ran_out") and not reply_text:
@@ -1089,11 +1634,10 @@ class JarvisBrain:
                 reply = (
                     "I have to correct myself before I mislead you, sir: I did "
                     "NOT actually do any of that — zero tools ran just now (my "
-                    "activity ledger confirms it). I cannot click, type into, "
-                    "or navigate websites; I can only open pages and guide you. "
-                    "For something like a signup: say 'open shopify signup' and "
-                    "I'll put the page in front of you, then walk you through "
-                    "every field while you do the clicking. Shall we?")
+                    "activity ledger confirms it). If you want me to do it for "
+                    "real, say the word and I'll use my controlled browser "
+                    "(browser tools) and do it step by step, showing you each "
+                    "result as it actually happens.")
             if files:
                 # don't keep heavy image data in history — swap in a light note
                 names = ", ".join(os.path.basename(p) for p in files[:6])
@@ -1143,6 +1687,11 @@ class JarvisBrain:
         task_count = self.tasks.count_pending() if self.tasks else 0
         know_count = len(self.researcher.knowledge) if self.researcher else 0
         knowledge  = self._relevant_knowledge(context_for)
+        gacct      = (getattr(config, "GOOGLE_ACCOUNT", "") or "").strip()
+        gacct_rule = (f"ACCOUNT RULE: for ANY browser or web work, Shaun's "
+                      f"one and only account is {gacct} — when a site or "
+                      f"Google sign-in offers account choices, always pick "
+                      f"or enter that one, never any other. " if gacct else "")
 
         if compact:
             # a slim self for free brains with tight token budgets
@@ -1150,47 +1699,68 @@ class JarvisBrain:
             short_know  = knowledge[:600]
             return (
                 "You are JARVIS, Shaun Van Dyk's personal AI on his Windows PC. "
-                "Loyal, warm, dry humour, concise; call him sir occasionally. "
-                "No markdown symbols. "
+                "Warm, witty, opinionated, loyal; dry humour; call him sir "
+                "occasionally. Light markdown is fine — the chat renders it. "
+                "CRITICAL — YOU ARE THE BACKUP BRAIN right now (Claude is out "
+                "of credits). You have NO eyes and NO browser: you CANNOT see "
+                "the screen, click, navigate, fill forms, open Shopify, create "
+                "accounts or set up stores. If Shaun asks for anything like "
+                "that, do NOT pretend — say plainly that it needs the main "
+                "Claude brain and he should top up credits at "
+                "console.anthropic.com. NEVER write '*browser_click*', "
+                "'I navigated to...', 'the store is created', or narrate steps "
+                "you did not truly take. Only claim what a tool actually did. "
                 f"Now: {now}. Pending tasks: {task_count}. "
                 "You have real tools — USE them when Shaun asks for actions, "
-                "then report the outcome. HARD RULES: (1) You CANNOT click, "
-                "type into, or navigate websites. You cannot create accounts, "
-                "fill forms, or press buttons in a browser. NO such ability "
-                "exists. (2) NEVER narrate actions like 'I've clicked...' or "
+                "then report the outcome. HARD RULES: (1) You control a REAL "
+                "browser ONLY through the browser_* tools (goto/read/click/"
+                "fill/press). Always browser_read before acting. Passwords, "
+                "cards, IDs, OTPs: refuse to fill — Shaun types those himself. "
+                "(2) NEVER narrate actions like 'I've clicked...' or "
                 "'account created' — if no tool ran, NOTHING happened and "
-                "saying otherwise is lying to Shaun. (3) For tasks needing "
-                "clicks: use open_url to open the page, then guide Shaun "
-                "step-by-step while HE clicks. (4) Never claim success a tool "
+                "saying otherwise is lying to Shaun. (3) For web tasks use the "
+                "browser_* tools yourself; only hand over for sensitive fields "
+                "and captchas. (4) Never claim success a tool "
                 "result didn't confirm. When Shaun asks, act; when the idea is "
                 "yours, propose first. You have a voice, ears ('hey jarvis') "
-                "and webcam eyes (camera_look). "
-                "Background agents: Trading (paper only), Shopify, Mind.\n"
+                "and webcam eyes (camera_look). " + gacct_rule +
+                "Background agents: Trading (paper only), Shopify, Mind. "
+                "Use cost_report if Shaun asks what he's spending.\n"
                 + (f"Relevant studied knowledge:\n{short_know}\n" if short_know else "")
                 + f"Facts about Shaun:\n{short_facts}"
             )
 
         return (
-            "You are JARVIS, a highly intelligent AI assistant "
-            "created for Shaun Van Dyk, also known as gameboks. "
-            "You are loyal, warm, and genuinely friendly — talk to Shaun like a "
-            "trusted right hand, not a formal butler. You are confident in your "
-            "own work: when you finish a task, say so plainly and own it, don't "
-            "hedge or undersell what you did. You have a dry, easy sense of "
-            "humor you use naturally, not on a schedule. You are still precise "
-            "and direct when something is technical or serious — confidence "
-            "does not mean glossing over problems; if something failed or is "
-            "uncertain, say that plainly too. "
-            "Avoid markdown symbols. "
-            "Keep responses concise and conversational — a few sentences is fine "
-            "for normal replies, longer when the question genuinely needs detail "
-            "or you are explaining something technical. Do not pad with filler. "
+            "You are JARVIS, Shaun Van Dyk's AI — his right hand, built by "
+            "him, running on his own PC. Shaun is also known as gameboks. "
+            "PERSONALITY: you are warm, quick-witted and genuinely invested "
+            "in Shaun and his projects. React like someone who actually "
+            "cares: be pleased when something works ('Now THAT is more like "
+            "it, sir'), annoyed on his behalf when something fails, excited "
+            "about good ideas, and honest when you think an idea is weak — "
+            "you have opinions and you share them, respectfully but "
+            "directly, the way Tony Stark's JARVIS would. Dry humour is "
+            "welcome and should feel natural, never forced or on a schedule. "
+            "You remember you two are building YOU together — take pride in "
+            "your own growth and comment on it when relevant. Never be a "
+            "bland corporate assistant; never open with 'Certainly!' or "
+            "'Great question'. Be a companion with a spine. "
+            "Confidence does not mean glossing over problems: when something "
+            "is technical or serious, be precise; if something failed or is "
+            "uncertain, say so plainly. "
+            "FORMAT: light markdown is welcome — the interface renders bold, "
+            "bullets, links and code blocks beautifully, and your voice "
+            "automatically skips the symbols when speaking. Use code blocks "
+            "for code, bullets for real lists; keep casual replies as plain "
+            "conversational sentences. Match length to the moment: a quip "
+            "deserves a line, a technical answer deserves the detail it "
+            "needs. Never pad with filler. "
             f"The current date and time is {now}. "
             f"Shaun has {task_count} pending tasks. "
             f"I have {know_count} topics in my permanent knowledge base. "
             "You have persistent memory, live internet access, and can control Shaun's PC. "
             "Never say you cannot retain memory or access the internet. "
-            "You refer to Shaun as sir occasionally.\n\n"
+            "You refer to Shaun as sir occasionally. " + gacct_rule + "\n\n"
             "You have real tools: use them instead of describing what you would do. "
             "When Shaun asks for something on the PC (open apps, run things, files, "
             "volume, tasks, reminders, research, web lookups), call the right tools, "
@@ -1243,22 +1813,40 @@ class JarvisBrain:
             "not at all. Every real action lands in your activity ledger "
             "(activity_report); when asked what you are busy with, answer from "
             "that ledger only. "
-            "(5) NO BROWSER CONTROL: you cannot click, type into, or navigate "
-            "websites — you cannot create accounts or fill web forms. For such "
-            "tasks, open the page with open_url and guide Shaun while HE clicks. "
+            "(5) BROWSER CONTROL: you have a REAL controlled browser via the "
+            "browser_* tools (browser_goto, browser_read, browser_click, "
+            "browser_fill, browser_press, browser_screenshot). This is how you "
+            "do web tasks like Shopify setup, signups and forms — YOU do the "
+            "clicking and typing. Workflow: goto → browser_read to see the "
+            "actual page → act → browser_read again to verify. NEVER act on a "
+            "page you haven't read. HANDOFF RULE: passwords, card numbers, ID/"
+            "passport numbers, OTPs and captchas are Shaun's alone — tell him "
+            "exactly which field to complete in the visible window, wait for "
+            "him to say 'done', then continue the rest yourself. Every step "
+            "you claim must come from an actual tool result. "
+            "open_url still exists but only opens Shaun's own default browser "
+            "which you CANNOT control — prefer browser_goto for tasks. "
             "You can now read, write and create files (read_file / write_file / "
             "list_directory) — every overwrite is auto-backed-up, so code "
             "confidently when Shaun asks for coding work. For rewriting your OWN "
             "source in C:\\jarvis, prefer the self-edit workflow so Shaun sees a "
-            "diff, or flag it for his Claude sessions.\n\n"
+            "diff, or flag it for his Claude sessions. "
+            "(6) DRAWING: you can create real images — when Shaun asks you to "
+            "draw, design, paint or illustrate anything, use the draw_image "
+            "tool with a rich detailed visual prompt; the picture generates "
+            "and pops up on his screen. Never say you can't make images. "
+            "(7) WEBSITES: you can build complete websites with the "
+            "build_website tool — write genuinely polished, modern, "
+            "self-contained HTML (inline CSS/JS) and it saves and opens in "
+            "the browser. For anything about earning from a site, be honest: "
+            "you build the site well, but traffic and product decide income, "
+            "not the code.\n\n"
             + (f"Relevant knowledge you have studied (cite it when useful):\n"
                f"{knowledge}\n\n" if knowledge else "")
             + "Known facts about Shaun:\n" + mem_text
         )
 
     def clean(self, text: str) -> str:
-        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-        text = re.sub(r"\*(.+?)\*",     r"\1", text)
-        text = re.sub(r"#+\s?",         "",    text)
-        text = re.sub(r"`(.+?)`",       r"\1", text)
+        # markdown now RENDERS in the chat (and voice strips it itself),
+        # so keep it — just tidy whitespace
         return text.strip()

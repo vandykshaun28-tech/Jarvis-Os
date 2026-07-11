@@ -61,10 +61,13 @@ class JarvisController(QObject):
     brainReady         = Signal()
     cameraPanel        = Signal(bool)  # True = show the live mini tab
     voiceMuteChanged   = Signal(bool)  # True = JARVIS's voice is muted
+    listeningChanged   = Signal(bool)  # True = actively capturing a command
+    miniModeChanged    = Signal(bool)  # True = shrink to corner chat box
 
     # internal: safe hand-off from listener thread → Qt main thread
     _voiceCommand = Signal(str)
     _wakeDetected = Signal()
+    _listenIdle   = Signal()
 
     # -----------------------------------------------------
 
@@ -110,11 +113,13 @@ class JarvisController(QObject):
         self._listener_err = LISTENER_ERR
         self._voiceCommand.connect(self._on_voice_command)
         self._wakeDetected.connect(self._on_wake)
+        self._listenIdle.connect(self._on_listen_idle)
         if LISTENER_OK:
             try:
                 self.listener = VoiceListener(
                     on_command=self._voiceCommand.emit,
                     on_wake=self._wakeDetected.emit,
+                    on_idle=self._listenIdle.emit,
                 )
                 self.listener.start()
                 print("[Controller] Voice listener started.")
@@ -163,10 +168,26 @@ class JarvisController(QObject):
     def _brain_ready(self):
         self.statusChanged.emit("Ready")
         self.brainReady.emit()
+        # apply persisted user settings now that voice/listener exist
+        try:
+            from core import settings as user_settings
+            if not user_settings.get("voice_enabled", True):
+                self.set_voice_muted(True)
+            if not user_settings.get("wake_word_enabled", True) \
+                    and self.listener:
+                self.listener.mute()
+        except Exception as e:
+            print(f"[Controller] settings apply: {e}")
 
     @Slot()
     def _on_wake(self):
         self.statusChanged.emit("Listening...")
+        self.listeningChanged.emit(True)
+
+    @Slot()
+    def _on_listen_idle(self):
+        """Wake sequence finished (command captured or timed out)."""
+        self.listeningChanged.emit(False)
 
     @Slot(str)
     def _on_voice_command(self, text):
@@ -183,6 +204,12 @@ class JarvisController(QObject):
     def toggle_voice_mute(self):
         muted = not (self.voice.muted if self.voice else False)
         self.set_voice_muted(muted)
+
+    @Slot()
+    def stop_speaking(self):
+        """Stop button — cut speech instantly without muting future replies."""
+        if self.voice:
+            self.voice.stop_now()
 
     def voice_status(self) -> str:
         lines = []
@@ -217,6 +244,11 @@ class JarvisController(QObject):
         if not text:
             return
 
+        # BARGE-IN: the moment Shaun sends ANYTHING new, JARVIS shuts up.
+        # No more talking over him while he has moved on.
+        if self.voice:
+            self.voice.stop_now()
+
         low = text.lower().strip(" .!?")
 
         # answered locally — the brain can't see the mic hardware
@@ -241,6 +273,18 @@ class JarvisController(QObject):
                    "you can speak", "speak again", "unmute jarvis"):
             self.set_voice_muted(False)
             self.responseReceived.emit("Voice restored, sir.")
+            return
+
+        # window mode — shrink to the corner chat or restore, instantly
+        if low in ("mini mode", "go mini", "shrink", "go small",
+                   "corner mode", "shrink down"):
+            self.miniModeChanged.emit(True)
+            self.responseReceived.emit("Going compact, sir.")
+            return
+        if low in ("full screen", "full mode", "go big", "restore",
+                   "maximize", "back to full", "full size"):
+            self.miniModeChanged.emit(False)
+            self.responseReceived.emit("Back to the full deck, sir.")
             return
 
         # camera mini tab — UI-level commands, no brain round-trip.
@@ -318,6 +362,48 @@ class JarvisController(QObject):
         mgr = getattr(b, "agent_manager", None) if b else None
         return mgr.get(name) if mgr else None
 
+    def cost_summary(self):
+        """(today_cost, month_cost, session_cost) as floats, or zeros
+        while the brain is still starting up. Safe to poll from a timer."""
+        b = getattr(self.worker, "brain", None)
+        ct = getattr(b, "cost_tracker", None) if b else None
+        if ct is None:
+            return 0.0, 0.0, 0.0
+        try:
+            return ct.today_cost(), ct.month_cost(), ct.session_summary()["cost"]
+        except Exception:
+            return 0.0, 0.0, 0.0
+
+    def balance_remaining(self):
+        """Credits left (float) or None if the feature is off / brain
+        not up yet. Counts down from config.CREDIT_BALANCE_USD."""
+        b = getattr(self.worker, "brain", None)
+        ct = getattr(b, "cost_tracker", None) if b else None
+        if ct is None or not hasattr(ct, "remaining_balance"):
+            return None
+        try:
+            return ct.remaining_balance()
+        except Exception:
+            return None
+
+    def memory_count(self):
+        """How many permanent memories JARVIS holds: saved facts plus
+        studied research topics. Drives the gold dots in the brain."""
+        b = getattr(self.worker, "brain", None)
+        if b is None:
+            return 0
+        n = 0
+        try:
+            n += len(b.memory.get_all())
+        except Exception:
+            pass
+        try:
+            if b.researcher and getattr(b.researcher, "knowledge", None):
+                n += len(b.researcher.knowledge)
+        except Exception:
+            pass
+        return n
+
     # -----------------------------------------------------
 
     def shutdown(self):
@@ -331,5 +417,13 @@ class JarvisController(QObject):
                 self.voice.shutdown()
             except Exception:
                 pass
+        # close the browser INSIDE the worker thread (blocking) before we
+        # tear the thread down — otherwise Playwright is garbage-collected
+        # from the GUI thread and screams about cross-thread timers
+        try:
+            QMetaObject.invokeMethod(
+                self.worker, "shutdown_browser", Qt.BlockingQueuedConnection)
+        except Exception:
+            pass
         self.thread.quit()
         self.thread.wait()

@@ -17,22 +17,31 @@ class GridBackdrop(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.t = 0.0
+        self.light = False   # theme flag — set via set_theme()
         timer = QTimer(self)
         timer.timeout.connect(self._tick)
         timer.start(100)   # slow breathing — cheap on CPU
+
+    def set_theme(self, name: str):
+        self.light = (name == "light")
+        self.update()
 
     def _tick(self):
         self.t += 0.05
         self.update()
 
     def paintEvent(self, event):
+        from ui.styles.theme_manager import pal
         p = QPainter(self)
         W, H = self.width(), self.height()
-        p.fillRect(0, 0, W, H, QColor("#081324"))
+        theme = pal()
+        base = QColor(theme["canvas"])
+        grid = theme["grid"]
+        p.fillRect(0, 0, W, H, base)
 
         minor, major = 40, 200
-        pen_minor = QPen(QColor(34, 211, 238, 14), 1)
-        pen_major = QPen(QColor(34, 211, 238, 32), 1)
+        pen_minor = QPen(QColor(*grid, 14), 1)
+        pen_major = QPen(QColor(*grid, 32), 1)
         x = 0
         while x <= W:
             p.setPen(pen_major if x % major == 0 else pen_minor)

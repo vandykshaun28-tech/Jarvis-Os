@@ -56,6 +56,16 @@ class Worker(QObject):
             self._wire_callbacks()
             print("[Worker] Brain loaded successfully.")
             self.ready.emit()
+            # Pocket JARVIS — phone chats with THIS same brain
+            try:
+                from core.phone_server import start_phone_server
+                url = start_phone_server(self.brain)
+                if url:
+                    self.progress.emit(
+                        f"[Phone] Pocket JARVIS is live, sir — open {url} "
+                        f"on your phone (same Wi-Fi) and enter your key.")
+            except Exception as e:
+                print(f"[Phone] server failed: {e}")
         except Exception as e:
             self._load_error = str(e)
             import traceback
@@ -81,6 +91,18 @@ class Worker(QObject):
                 obj.chat_callback = self.progress.emit
             if hasattr(obj, "voice_callback"):
                 obj.voice_callback = self.voice_speak
+
+    @Slot()
+    def shutdown_browser(self):
+        """Close Playwright IN THIS (worker) thread — it was created here,
+        and tearing it down from the GUI thread on exit is what threw the
+        'Timers cannot be stopped from another thread' / EPIPE errors."""
+        b = getattr(self.brain, "browser", None) if self.brain else None
+        if b is not None:
+            try:
+                b.close()
+            except Exception:
+                pass
 
     @Slot(str)
     def process(self, text: str):

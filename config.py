@@ -39,6 +39,7 @@ KNOWLEDGE_FILE      = MEMORY_DIR / "knowledge.json"
 SESSION_FILE        = MEMORY_DIR / "last_session.json"
 TASKS_FILE          = MEMORY_DIR / "tasks.json"
 RESEARCH_QUEUE_FILE = MEMORY_DIR / "research_queue.json"
+COST_LOG_FILE        = MEMORY_DIR / "cost_log.json"
 
 # ── Obsidian vault ──────────────────────────────
 VAULT_PATH = Path(os.environ.get(
@@ -47,7 +48,22 @@ VAULT_PATH = Path(os.environ.get(
 ))
 
 # ── AI ──────────────────────────────────────────
-CLAUDE_MODEL = "claude-sonnet-4-6"
+# Two Claude tiers, both paid Anthropic API (console.anthropic.com):
+#   FAST  — Haiku:  cheap, quick, handles all normal chat + tool use.
+#   SMART — Sonnet: coding, self-edits, research synthesis, browser work.
+# The brain picks per-message; normal chatter never burns Sonnet money.
+# Set a monthly spend limit in the Anthropic console so it can't run away.
+CLAUDE_MODEL      = "claude-sonnet-4-6"            # SMART tier
+CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"    # FAST tier (default)
+
+# Pricing in USD per million tokens (input, output) — as of July 2026.
+# Anthropic occasionally changes these; check console.anthropic.com/
+# settings/billing or docs.claude.com/en/docs/about-claude/pricing if
+# the cost dashboard ever looks off, and update the numbers below.
+CLAUDE_PRICING = {
+    CLAUDE_MODEL_FAST: (1.00, 5.00),
+    CLAUDE_MODEL:       (3.00, 15.00),
+}
 
 # Brain providers, tried in order. Anthropic (Claude) is the smartest;
 # when it's out of credits JARVIS automatically falls back to the FREE
@@ -56,7 +72,7 @@ CLAUDE_MODEL = "claude-sonnet-4-6"
 #   Gemini: aistudio.google.com/apikey → set env var GEMINI_API_KEY
 # Ollama = fully local & free forever (install from ollama.com), used
 # last if it's running.
-LLM_PROVIDER_ORDER = ["anthropic", "groq", "openrouter", "gemini", "ollama"]
+LLM_PROVIDER_ORDER = ["anthropic", "groq", "gemini", "openrouter", "ollama"]
 GROQ_MODEL           = "llama-3.3-70b-versatile"
 GROQ_MODEL_FALLBACKS = ["llama-3.1-8b-instant"]   # higher free limits
 OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
@@ -66,10 +82,16 @@ OPENROUTER_MODEL_FALLBACKS = [
     "qwen/qwen-2.5-72b-instruct:free",
     "google/gemma-3-27b-it:free",
 ]
-GEMINI_MODEL = "gemini-2.0-flash"
+# Gemini free tier (verified July 2026). Old gemini-2.0-flash / 1.5 were
+# SHUT DOWN and return 404 — using them was the reason Gemini "didn't
+# work". gemini-2.5-flash-lite has the most generous free quota
+# (15 req/min, 1000/day); flash-latest currently points to 3.5 Flash.
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+# free image generation model — used for "draw me..." requests
+GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 # tried in order if the first model name is rejected (Google renames often)
 GEMINI_MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-flash-latest",
-                          "gemini-1.5-flash"]
+                          "gemini-3.5-flash", "gemini-3.1-flash-lite"]
 OLLAMA_MODEL = "qwen2.5:7b"
 OLLAMA_URL   = "http://localhost:11434/v1"
 
@@ -123,3 +145,26 @@ FILE_BACKUP_DIR = MEMORY_DIR / "file_backups"
 MIC_DEVICE_NAME  = ""
 # (legacy fallback — only used if MIC_DEVICE_NAME is empty)
 MIC_DEVICE_INDEX = None
+
+CREDIT_BALANCE_USD = 25.00   # synced after top-up
+
+CREDIT_BALANCE_USD = 6.00   # synced after top-up
+
+GOOGLE_ACCOUNT = 'vandykshaun28@gmail.com'
+
+# -- autopilot: secrets come from keys.py (never committed to git) --
+try:
+    import keys as _k
+    for _n in ("SHOPIFY_STORE", "SHOPIFY_TOKEN", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"):
+        _v = (getattr(_k, _n, "") or "").strip()
+        if _v:
+            globals()[_n] = _v
+            os.environ[_n] = _v
+except ImportError:
+    pass
+SHOPIFY_AUTO_FULFIL  = False      # set True when you trust him to fulfil
+AUTOPILOT_REPLY_MODE = "approve"  # "auto" later, when his drafts earn it
+
+PHONE_KEY = 'shaun-2026-secret'
+
+PHONE_KEY = 'shaun-2026-secret'

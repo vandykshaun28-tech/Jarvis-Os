@@ -79,6 +79,7 @@ class Footer(QWidget):
         )
 
         layout.addWidget(copyright_lbl)
+        self._copyright_lbl = copyright_lbl
 
         self.setStyleSheet("""
 
@@ -93,3 +94,14 @@ class Footer(QWidget):
         }
 
         """)
+
+    def retheme(self):
+        from ui.styles.theme_manager import pal
+        p = pal()
+        panel_bg = ("rgba(255,255,255,0.92)" if p["name"] == "light"
+                    else "rgba(10,20,32,0.88)")
+        self.setStyleSheet(
+            f"QWidget{{background:{panel_bg};"
+            f"border:1px solid {p['line']};border-radius:10px;}}")
+        self._copyright_lbl.setStyleSheet(
+            f"border:none; font-size:11px; color:{p['accent']};")

@@ -115,19 +115,31 @@ def _tools_to_openai(tools):
 
 class UniversalLLM:
 
-    def __init__(self, anthropic_client=None):
+    def __init__(self, anthropic_client=None, cost_tracker=None):
         self.anthropic = anthropic_client
         self.active_provider = None   # last provider that worked
+        self.cost_tracker = cost_tracker
 
     # ── low-level single calls ──────────────────
 
-    def _anthropic_call(self, system, messages, tools, max_tokens):
+    def _anthropic_call(self, system, messages, tools, max_tokens,
+                        smart=False):
+        model = config.CLAUDE_MODEL if smart else getattr(
+            config, "CLAUDE_MODEL_FAST", config.CLAUDE_MODEL)
         try:
-            kwargs = dict(model=config.CLAUDE_MODEL, max_tokens=max_tokens,
+            kwargs = dict(model=model, max_tokens=max_tokens,
                           system=system, messages=messages)
             if tools:
                 kwargs["tools"] = tools
-            return self.anthropic.messages.create(**kwargs)
+            resp = self.anthropic.messages.create(**kwargs)
+            if self.cost_tracker is not None:
+                try:
+                    u = resp.usage
+                    self.cost_tracker.record(model, u.input_tokens,
+                                             u.output_tokens)
+                except Exception as e:
+                    print(f"[LLM] cost tracking failed: {e}")
+            return resp
         except Exception as e:
             s = str(e).lower()
             if any(w in s for w in ("credit balance", "authentication",
@@ -246,7 +258,8 @@ class UniversalLLM:
 
     def run_tool_loop(self, system, history, user_content, tools,
                       execute, on_text=None, max_rounds=10,
-                      compact_system=None, compact_tools=None):
+                      compact_system=None, compact_tools=None,
+                      smart=False):
         """history: prior turns [{'role','content'(str)}...]
            user_content: str or Anthropic-style block list for THIS turn.
            execute(name, args) -> str result.
@@ -272,7 +285,7 @@ class UniversalLLM:
             try:
                 result = self._loop_with(name, prov, use_system, history,
                                          user_content, use_tools, execute,
-                                         on_text, max_rounds)
+                                         on_text, max_rounds, smart=smart)
                 self.active_provider = name
                 result["provider"] = name
                 return result
@@ -292,8 +305,11 @@ class UniversalLLM:
             if not prov:
                 continue
             if name == "anthropic":
+                fast = getattr(config, "CLAUDE_MODEL_FAST", "")
                 state = ("key found" if prov["ok"] and self.anthropic
                          else "NO KEY / client failed")
+                if fast:
+                    state += f" — fast: {fast}, smart: {config.CLAUDE_MODEL}"
             elif name == "ollama":
                 state = f"will try {prov['base']} (local, only if installed)"
             elif name == "gemini":
@@ -314,13 +330,14 @@ class UniversalLLM:
         return "\n".join(lines)
 
     def _loop_with(self, name, prov, system, history, user_content,
-                   tools, execute, on_text, max_rounds):
+                   tools, execute, on_text, max_rounds, smart=False):
         tools_used = []
 
         if prov["kind"] == "anthropic":
             messages = list(history) + [{"role": "user", "content": user_content}]
             for _ in range(max_rounds):
-                resp = self._anthropic_call(system, messages, tools, 1024)
+                resp = self._anthropic_call(system, messages, tools, 4096,
+                                            smart=smart)
                 tool_blocks = [b for b in resp.content
                                if getattr(b, "type", "") == "tool_use"]
                 text_parts = [b.text for b in resp.content
@@ -416,6 +433,56 @@ class UniversalLLM:
                 last_exc = e
                 continue   # next model candidate
         raise last_exc or ProviderDead("no model candidates worked")
+
+    def generate_image(self, prompt, out_path):
+        """Generate an image from a text prompt using Gemini's free
+        image model (gemini-2.5-flash-image). Saves a PNG to out_path
+        and returns the path, or raises with a clear reason."""
+        import base64 as _b64
+        key = os.environ.get("GEMINI_API_KEY", "")
+        if not key:
+            raise RuntimeError(
+                "Image generation needs a Gemini key (free at "
+                "aistudio.google.com/apikey) in keys.py as GEMINI_API_KEY.")
+        model = getattr(config, "GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+        url = (f"https://generativelanguage.googleapis.com/v1beta/"
+               f"models/{model}:generateContent?key={key}")
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["IMAGE"]},
+        }
+        try:
+            r = httpx.post(url, json=payload, timeout=180,
+                           headers={"x-goog-api-key": key})
+        except Exception as e:
+            raise RuntimeError(f"could not reach the image service: {e}")
+        if r.status_code != 200:
+            raise RuntimeError(f"image API HTTP {r.status_code}: "
+                               f"{r.text[:180]}")
+        data = r.json()
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        if "error" in data:
+            err = data["error"]
+            msg = err.get("message", str(err)) if isinstance(err, dict) \
+                else str(err)
+            raise RuntimeError(f"image API error: {msg[:180]}")
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+        except Exception:
+            raise RuntimeError(f"unexpected image response: {str(data)[:180]}")
+        for part in parts:
+            inline = part.get("inline_data") or part.get("inlineData")
+            if inline and inline.get("data"):
+                raw = _b64.b64decode(inline["data"])
+                import os as _os
+                _os.makedirs(_os.path.dirname(_os.path.abspath(out_path)),
+                             exist_ok=True)
+                with open(out_path, "wb") as f:
+                    f.write(raw)
+                return out_path
+        raise RuntimeError("the model returned no image (it may have "
+                           "refused the prompt)")
 
     # ── simple one-shot (Mind, small jobs) ──────
 

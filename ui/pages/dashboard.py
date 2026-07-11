@@ -21,37 +21,64 @@ class StageCard(QFrame):
 
     def __init__(self, title):
         super().__init__()
+        self._drag = None
         self.setStyleSheet(
             f"QFrame{{background:rgba(8,17,28,0.86);border:1px solid {LINE};"
             f"border-radius:12px;}}")
-        self.setFixedWidth(230)
+        self.setFixedWidth(200)
+        self.setMaximumHeight(78)
+        self.setCursor(Qt.OpenHandCursor)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(3)
+        lay.setContentsMargins(12, 7, 12, 7)
+        lay.setSpacing(1)
         t = QLabel(title)
-        t.setStyleSheet(f"color:{DIM};font-size:9px;font-weight:700;"
+        t.setStyleSheet(f"color:{DIM};font-size:8px;font-weight:700;"
                         f"letter-spacing:2px;border:none;background:transparent;")
         lay.addWidget(t)
         self.value = QLabel("—")
         self.value.setWordWrap(True)
-        self.value.setStyleSheet(f"color:{CYAN};font-size:13px;font-weight:600;"
+        self.value.setStyleSheet(f"color:{CYAN};font-size:12px;font-weight:600;"
                                  f"border:none;background:transparent;")
         lay.addWidget(self.value)
         self.sub = QLabel("")
-        self.sub.setStyleSheet(f"color:{DIM};font-size:10px;border:none;"
+        self.sub.setStyleSheet(f"color:{DIM};font-size:9px;border:none;"
                                f"background:transparent;")
         self.sub.setWordWrap(True)
         lay.addWidget(self.sub)
 
+    # ── drag anywhere ────────────────────────────
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag = event.position().toPoint()
+            self.setCursor(Qt.ClosedHandCursor)
+            self.raise_()
+
+    def mouseMoveEvent(self, event):
+        if self._drag is not None and self.parentWidget():
+            new = self.mapToParent(event.position().toPoint() - self._drag)
+            par = self.parentWidget()
+            x = max(0, min(new.x(), par.width() - self.width()))
+            y = max(0, min(new.y(), par.height() - self.height()))
+            self.move(x, y)
+
+    def mouseReleaseEvent(self, event):
+        self._drag = None
+        self.setCursor(Qt.OpenHandCursor)
+
     def set(self, value, sub="", color=CYAN):
-        self.value.setText(str(value))
-        self.value.setStyleSheet(f"color:{color};font-size:13px;font-weight:600;"
+        v = str(value)
+        if len(v) > 60:
+            v = v[:57] + "…"
+        self.value.setText(v)
+        self.value.setStyleSheet(f"color:{color};font-size:12px;font-weight:600;"
                                  f"border:none;background:transparent;")
-        self.sub.setText(sub)
+        self.sub.setText(sub[:50])
 
 
 class ListenPill(QFrame):
-    """'listening — say hey jarvis' with a little animated equalizer."""
+    """Live-mic pill. HIDDEN on standby — it only appears while JARVIS
+    is actually capturing your command (after 'hey jarvis'), or stays
+    up in red if the microphone is offline."""
 
     def __init__(self):
         super().__init__()
@@ -65,14 +92,14 @@ class ListenPill(QFrame):
         self.bars.setStyleSheet(f"color:{CYAN};font-size:13px;border:none;"
                                 f"background:transparent;")
         lay.addWidget(self.bars)
-        self.text = QLabel('listening — say  "hey jarvis"')
+        self.text = QLabel("listening, sir…")
         self.text.setStyleSheet(f"color:{DIM};font-size:12px;border:none;"
                                 f"background:transparent;")
         lay.addWidget(self.text)
         self._t = 0
-        timer = QTimer(self)
-        timer.timeout.connect(self._tick)
-        timer.start(160)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self.hide()                       # standby = invisible
 
     def _tick(self):
         self._t += 1
@@ -83,15 +110,22 @@ class ListenPill(QFrame):
 
     def set_state(self, state, detail=""):
         if state == "offline":
+            self._timer.stop()
+            self.bars.setText("▁▁▁▁▁")
             self.bars.setStyleSheet(f"color:{RED};font-size:13px;border:none;"
                                     f"background:transparent;")
             self.text.setText(detail or "microphone offline — type 'voice status'")
-        elif state == "speaking":
-            self.text.setText("JARVIS is speaking…")
-        else:
+            self.show()
+        elif state == "listening":
             self.bars.setStyleSheet(f"color:{CYAN};font-size:13px;border:none;"
                                     f"background:transparent;")
-            self.text.setText('listening — say  "hey jarvis"')
+            self.text.setText("listening, sir…")
+            self._timer.start(120)
+            self.show()
+            self.raise_()
+        else:                              # "hidden" / standby
+            self._timer.stop()
+            self.hide()
 
 
 class DashboardPage(QWidget):
@@ -113,20 +147,19 @@ class DashboardPage(QWidget):
         self.core = ConceptOrb()
         root.addWidget(self.core, 1)
 
-        # floating stage cards, top-left over the orb
-        overlay = QWidget(self.core)
-        overlay.setStyleSheet("background:transparent;")
-        ov = QVBoxLayout(overlay)
-        ov.setContentsMargins(18, 18, 0, 0)
-        ov.setSpacing(10)
+        # floating stage cards — free children of the orb, draggable
+        # anywhere on the interface (not locked in a layout)
         self.card_now    = StageCard("NOW")
         self.card_pnl    = StageCard("PAPER P&L")
         self.card_thought = StageCard("LAST THOUGHT")
-        for c in (self.card_now, self.card_pnl, self.card_thought):
-            ov.addWidget(c)
-        ov.addStretch()
-        overlay.move(0, 0)
-        overlay.resize(260, 420)
+        self._cards = [self.card_now, self.card_pnl, self.card_thought]
+        y = 16
+        for c in self._cards:
+            c.setParent(self)
+            c.move(16, y)
+            c.show()
+            c.raise_()
+            y += 88
 
         # listening pill, bottom-centre
         self.pill = ListenPill()
@@ -152,8 +185,22 @@ class DashboardPage(QWidget):
             self._refresh_mind()
             self._refresh_listen()
             self._refresh_now()
+            self._refresh_memories()
         except Exception:
             pass
+
+    def _refresh_memories(self):
+        """One gold neuron per permanent memory — the brain fills up
+        with what JARVIS has learned."""
+        get = self.providers.get("memories")
+        if not get:
+            return
+        try:
+            n = int(get() or 0)
+        except Exception:
+            return
+        if hasattr(self.core, "set_memory_count"):
+            self.core.set_memory_count(n)
 
     def _refresh_now(self):
         get = self.providers.get("activity")
@@ -163,6 +210,18 @@ class DashboardPage(QWidget):
         if now and now not in ("idle", "unknown", "starting up"):
             self.card_now.set(now[:70], "live — from the activity ledger",
                               "#f5a623")
+            # the brain itself shows WORKING — with what he's busy on
+            if hasattr(self.core, "set_working"):
+                try:
+                    self.core.set_working(now)
+                except Exception:
+                    pass
+        elif getattr(self.core, "mode", "") == "working":
+            # work finished and nothing new started — back to standby
+            try:
+                self.core.set_idle()
+            except Exception:
+                pass
 
     def _refresh_trading(self):
         get = self.providers.get("trading")
@@ -198,8 +257,19 @@ class DashboardPage(QWidget):
         listener = get() if get else None
         if listener is None:
             self.pill.set_state("offline")
+        elif not getattr(self, "_listening_live", False):
+            self.pill.set_state("hidden")
+        # while actively listening, set_listening() drives the pill
+
+    # ── live mic state from controller (wake word → capture → idle) ──
+    def set_listening(self, on: bool):
+        self._listening_live = bool(on)
+        get = self.providers.get("listener")
+        listener = get() if get else None
+        if listener is None:
+            self.pill.set_state("offline")
         else:
-            self.pill.set_state("listening")
+            self.pill.set_state("listening" if on else "hidden")
 
     # ── busy state from controller ──────────────
     def set_thinking(self):

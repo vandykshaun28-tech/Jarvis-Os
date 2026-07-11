@@ -6,6 +6,8 @@ import config
 
 try:
     import pyautogui
+    pyautogui.FAILSAFE = True    # slam mouse to top-left corner = instant abort
+    pyautogui.PAUSE = 0.05
     PYGUI_OK = True
 except:
     PYGUI_OK = False
@@ -21,6 +23,7 @@ CREATE_NO_WINDOW = 0x08000000
 class PCControl:
     def __init__(self, on_status=None):
         self.on_status = on_status
+        self.last_screenshot = None
         print("[PC] PC Control engine online.")
 
     def show_desktop(self):
@@ -71,13 +74,112 @@ class PCControl:
         from datetime import datetime
         p = str(d / f"screen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
         pyautogui.screenshot().save(p)
-        return f"Screenshot saved, sir."
+        self.last_screenshot = p
+        return f"Screenshot saved to {p}"
 
     def type_text(self, text):
+        """Type into the focused window. Plain short text is typed
+        key-by-key (visible, human-like). Anything long or with special
+        characters (unicode, symbols pyautogui can't press) goes in via
+        clipboard-paste — reliable for EVERYTHING."""
         if not PYGUI_OK: return "Not available, sir."
-        time.sleep(0.5)
-        pyautogui.typewrite(text, interval=0.05)
+        text = str(text)
+        time.sleep(0.4)
+        simple = all(32 <= ord(c) < 127 or c in "\n\t" for c in text)
+        if simple and len(text) <= 200:
+            pyautogui.typewrite(text, interval=0.03)
+        else:
+            self.set_clipboard(text)
+            time.sleep(0.15)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.25)
         return f"Typed: {text[:40]}"
+
+    # ── MOUSE — real cursor control (the hands) ─────────────────────
+    # These move the ACTUAL cursor, visibly, like a person at the desk.
+    # Safety: pyautogui.FAILSAFE is on — slamming the mouse into the
+    # top-left corner of the screen aborts any action instantly.
+
+    def screen_size(self):
+        if not PYGUI_OK: return (0, 0)
+        s = pyautogui.size()
+        return (s.width, s.height)
+
+    def mouse_position(self):
+        if not PYGUI_OK: return (0, 0)
+        p = pyautogui.position()
+        return (p.x, p.y)
+
+    def move_mouse(self, x, y, duration=0.35):
+        """Glide the cursor to (x, y) — visible, human-like movement."""
+        if not PYGUI_OK: return "Mouse control not available, sir."
+        w, h = self.screen_size()
+        x = max(1, min(int(x), w - 2))   # keep out of the failsafe corner
+        y = max(1, min(int(y), h - 2))
+        pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeOutQuad)
+        return f"Cursor at ({x}, {y})."
+
+    def click_at(self, x=None, y=None, button="left", clicks=1):
+        """Move the cursor there (visibly) and click. No coords = click here."""
+        if not PYGUI_OK: return "Mouse control not available, sir."
+        if x is not None and y is not None:
+            self.move_mouse(x, y)
+            time.sleep(0.08)
+        pyautogui.click(button=button, clicks=clicks,
+                        interval=0.12 if clicks > 1 else 0.0)
+        p = pyautogui.position()
+        what = {("left", 1): "Clicked", ("left", 2): "Double-clicked",
+                ("right", 1): "Right-clicked"}.get((button, clicks),
+                                                   f"{button}-clicked x{clicks}")
+        return f"{what} at ({p.x}, {p.y})."
+
+    def double_click_at(self, x=None, y=None):
+        return self.click_at(x, y, button="left", clicks=2)
+
+    def right_click_at(self, x=None, y=None):
+        return self.click_at(x, y, button="right", clicks=1)
+
+    def drag_to(self, x1, y1, x2, y2, duration=0.6):
+        """Press at (x1,y1), drag to (x2,y2), release."""
+        if not PYGUI_OK: return "Mouse control not available, sir."
+        self.move_mouse(x1, y1)
+        time.sleep(0.1)
+        pyautogui.dragTo(int(x2), int(y2), duration=duration, button="left")
+        return f"Dragged from ({x1}, {y1}) to ({x2}, {y2})."
+
+    def scroll_wheel(self, amount, x=None, y=None):
+        """Scroll at a position. Positive = up, negative = down."""
+        if not PYGUI_OK: return "Mouse control not available, sir."
+        if x is not None and y is not None:
+            self.move_mouse(x, y, duration=0.2)
+        pyautogui.scroll(int(amount))
+        return f"Scrolled {'up' if amount > 0 else 'down'} {abs(int(amount))}."
+
+    def press_keys(self, *keys):
+        """Press a key or combo, e.g. press_keys('ctrl','s') or ('enter',)."""
+        if not PYGUI_OK: return "Keyboard control not available, sir."
+        keys = [str(k).lower().strip() for k in keys if str(k).strip()]
+        if not keys: return "No keys given, sir."
+        if len(keys) == 1:
+            pyautogui.press(keys[0])
+        else:
+            pyautogui.hotkey(*keys)
+        return f"Pressed {'+'.join(keys)}."
+
+    def screenshot_b64(self, max_width=1280):
+        """Screenshot → (base64 JPEG, img_w, img_h, screen_w, screen_h).
+        Downscaled so the vision brain gets a crisp-but-cheap image;
+        the computer agent scales coordinates back up to real pixels."""
+        if not PYGUI_OK: return None
+        import base64, io
+        img = pyautogui.screenshot()
+        sw, sh = img.size
+        if sw > max_width:
+            img = img.resize((max_width, int(sh * max_width / sw)))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=70)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return (b64, img.size[0], img.size[1], sw, sh)
 
     def open_url(self, url):
         if not url.startswith("http"): url = "https://" + url
@@ -239,8 +341,13 @@ class PCControl:
         return r.stdout.strip()
 
     def set_clipboard(self, text):
-        subprocess.run(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", f"Set-Clipboard -Value '{text}'"],
-                      capture_output=True, creationflags=CREATE_NO_WINDOW)
+        # text goes in via stdin — quotes, newlines and unicode all
+        # survive (the old -Value '...' broke on apostrophes)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+             "-Command", "$input | Set-Clipboard"],
+            input=str(text), text=True, encoding="utf-8",
+            capture_output=True, creationflags=CREATE_NO_WINDOW)
         return "Copied to clipboard, sir."
 
     def list_processes(self):

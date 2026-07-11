@@ -1,11 +1,24 @@
 """
 Shopify page — connection state and the agent's recent activity.
+Entering this tab also opens your Shopify admin in the browser.
 """
+
+import time
+import webbrowser
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
 from PySide6.QtCore import QTimer
 
 import config
+
+
+def _admin_url() -> str:
+    """Your store's admin if configured, else the general admin page."""
+    store = (getattr(config, "SHOPIFY_STORE", "") or "").strip()
+    if store:
+        handle = store.split(".")[0]
+        return f"https://admin.shopify.com/store/{handle}"
+    return "https://admin.shopify.com"
 
 
 class ShopifyPage(QWidget):
@@ -14,6 +27,7 @@ class ShopifyPage(QWidget):
     def __init__(self, provider=None):
         super().__init__()
         self.provider = provider or (lambda: None)
+        self._last_open = 0.0
         self.setStyleSheet("background:transparent;")
 
         root = QVBoxLayout(self)
@@ -67,6 +81,18 @@ class ShopifyPage(QWidget):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(3000)
         self.refresh()
+
+    def showEvent(self, event):
+        """Fires when you switch INTO this tab — open the real store.
+        Debounced so window restores don't spam browser tabs."""
+        super().showEvent(event)
+        now = time.time()
+        if now - self._last_open > 15:
+            self._last_open = now
+            try:
+                webbrowser.open(_admin_url())
+            except Exception as e:
+                print(f"[Shopify] couldn't open browser: {e}")
 
     def refresh(self):
         try:

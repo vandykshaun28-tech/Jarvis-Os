@@ -69,7 +69,7 @@ class Header(QWidget):
 
         title_block.setContentsMargins(0, 0, 0, 0)
 
-        self.title = QLabel("JARVIS")
+        self.title = QLabel("ALLISON")
 
         self.title.setObjectName("title")
 

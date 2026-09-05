@@ -63,6 +63,9 @@ class JarvisController(QObject):
     voiceMuteChanged   = Signal(bool)  # True = JARVIS's voice is muted
     listeningChanged   = Signal(bool)  # True = actively capturing a command
     miniModeChanged    = Signal(bool)  # True = shrink to corner chat box
+    # a message that arrived from the OTHER window (the phone), so the
+    # desk console can show it live instead of the two logs diverging
+    remoteMessage      = Signal(str, str)   # (role, text)
 
     # internal: safe hand-off from listener thread → Qt main thread
     _voiceCommand = Signal(str)
@@ -168,6 +171,30 @@ class JarvisController(QObject):
     def _brain_ready(self):
         self.statusChanged.emit("Ready")
         self.brainReady.emit()
+        # ── LISTEN TO THE SHARED TRANSCRIPT ──────────────────────────
+        # The phone writes to the same session object. Emitting a Qt
+        # signal here is what makes the hand-off thread-safe: the
+        # callback fires on Flask's thread, and Qt marshals delivery
+        # onto the UI thread for us. Touching widgets directly from
+        # that callback would be a crash waiting to happen.
+        try:
+            brain = getattr(self.worker, "brain", None) or \
+                getattr(self, "brain", None)
+            sess = getattr(brain, "session", None)
+            if sess is not None:
+                def _on_remote(msg):
+                    try:
+                        if msg.get("source") == "phone":
+                            self.remoteMessage.emit(
+                                str(msg.get("role", "")),
+                                str(msg.get("text", "")))
+                    except Exception:
+                        pass
+                sess.subscribe(_on_remote)
+                self._session_sub = _on_remote      # keep a reference
+                print("[Controller] desk is listening to the shared session")
+        except Exception as e:
+            print(f"[Controller] shared session subscribe failed: {e}")
         # apply persisted user settings now that voice/listener exist
         try:
             from core import settings as user_settings
@@ -361,6 +388,15 @@ class JarvisController(QObject):
         b = getattr(self.worker, "brain", None)
         mgr = getattr(b, "agent_manager", None) if b else None
         return mgr.get(name) if mgr else None
+
+    def study_progress(self):
+        """Live study state {topic, percent, stage, active} so the AI
+        Agents page can draw a progress bar Shaun can watch."""
+        b = getattr(self.worker, "brain", None)
+        if b is None:
+            return {"topic": "", "percent": 0, "stage": "", "active": False}
+        return getattr(b, "study_progress",
+                       {"topic": "", "percent": 0, "stage": "", "active": False})
 
     def cost_summary(self):
         """(today_cost, month_cost, session_cost) as floats, or zeros

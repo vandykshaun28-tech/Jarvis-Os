@@ -18,6 +18,7 @@ brain-dead just because one tank is empty.
 import base64
 import json
 import os
+import re
 
 import httpx
 
@@ -33,20 +34,132 @@ class ToolCallGlitch(Exception):
     NOT a dead provider — retry, then fall back to a tool-less answer."""
 
 
+def gemini_available_models(timeout=15):
+    """Ask Google which models this KEY can actually use.
+
+    Hardcoding a model name is how Allison ended up dead in the water:
+    "models/gemini-2.5-flash is no longer available to new users".
+    Google retires names on their own schedule, and a name that worked
+    when the code was written says nothing about today. So ask.
+
+    Returns (models, error) where models is a list of usable ids for
+    generateContent, newest-looking first.
+    """
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        return [], "GEMINI_API_KEY not set"
+    try:
+        r = httpx.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": key, "pageSize": 200}, timeout=timeout)
+    except Exception as e:
+        return [], f"unreachable: {e}"
+    if r.status_code >= 400:
+        return [], f"HTTP {r.status_code}: {r.text[:180]}"
+    try:
+        data = r.json()
+    except Exception as e:
+        return [], f"non-JSON reply: {e}"
+    out = []
+    for m in data.get("models", []):
+        if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+            continue
+        name = str(m.get("name", "")).replace("models/", "")
+        if not name:
+            continue
+        out.append(name)
+
+    def rank(n):
+        # prefer stable aliases, then newer families, then flash over pro
+        # (free tier is far kinder to flash)
+        score = 0
+        if n.endswith("-latest"):
+            score -= 40
+        mm = re.search(r"gemini-(\d+)", n)
+        if mm:
+            score -= int(mm.group(1)) * 10
+        if "flash" in n:
+            score -= 5
+        if "lite" in n:
+            score -= 2
+        for bad in ("vision", "embedding", "aqa", "tts", "image", "live",
+                    "thinking", "exp", "preview"):
+            if bad in n:
+                score += 25
+        return (score, n)
+
+    out.sort(key=rank)
+    return out, ""
+
+
+def pick_gemini_model():
+    """A model id this key can really use, or the configured default."""
+    models, err = gemini_available_models()
+    if models:
+        return models[0], models, err
+    return config.GEMINI_MODEL, [], err
+
+
+_GEMINI_LIVE = {"model": None, "checked": False}
+
+
+def _live_gemini_model():
+    """The configured model if it still exists, otherwise a real one.
+
+    Checked once per process. A stale hardcoded name is a silent
+    outage: every request 404s with "no longer available to new users"
+    and the whole assistant falls through to the next brain for no
+    reason a user could ever guess at.
+    """
+    if _GEMINI_LIVE["checked"]:
+        return _GEMINI_LIVE["model"] or config.GEMINI_MODEL
+    _GEMINI_LIVE["checked"] = True
+    if not os.environ.get("GEMINI_API_KEY"):
+        _GEMINI_LIVE["model"] = config.GEMINI_MODEL
+        return config.GEMINI_MODEL
+    try:
+        models, err = gemini_available_models()
+    except Exception:
+        models, err = [], "probe failed"
+    if not models:
+        _GEMINI_LIVE["model"] = config.GEMINI_MODEL
+        return config.GEMINI_MODEL
+    want = config.GEMINI_MODEL
+    if want in models:
+        _GEMINI_LIVE["model"] = want
+    else:
+        _GEMINI_LIVE["model"] = models[0]
+        print(f"[LLM] configured Gemini model {want!r} is not available to "
+              f"this key — using {models[0]!r} instead. "
+              f"({len(models)} usable models found)")
+    return _GEMINI_LIVE["model"]
+
+
 def _providers():
-    """Provider table, built fresh so env-var changes are picked up."""
+    """Provider table, built fresh so env-var changes are picked up.
+
+    "tools" is a HARD capability claim, not a hope. It means: this
+    provider returns real structured tool-call fields that we parse, and
+    if it doesn't, that's a bug we want to see rather than absorb.
+
+    OpenRouter's free Llama endpoints and most Ollama builds ACCEPT the
+    `tools` parameter and then ignore it — replying in prose as though
+    they'd used it. That is indistinguishable from success at the HTTP
+    layer and is precisely how a "tool call" becomes a hallucination. So
+    they are marked tools=False and are never handed a tool-bearing turn.
+    """
     return {
-        "anthropic": {"kind": "anthropic", "vision": True,
+        "anthropic": {"kind": "anthropic", "vision": True, "tools": True,
                       "model": config.CLAUDE_MODEL,
                       "ok": bool(os.environ.get("ANTHROPIC_API_KEY"))},
-        "groq":      {"kind": "openai", "vision": False,
+        "groq":      {"kind": "openai", "vision": False, "tools": True,
                       "base": "https://api.groq.com/openai/v1",
                       "model": config.GROQ_MODEL,
                       "models": [config.GROQ_MODEL]
                                 + list(getattr(config, "GROQ_MODEL_FALLBACKS", [])),
                       "key": os.environ.get("GROQ_API_KEY", ""),
                       "ok": bool(os.environ.get("GROQ_API_KEY"))},
-        "openrouter": {"kind": "openai", "vision": False,
+        "openrouter": {"kind": "openai", "vision": False, "tools": False,
                        "base": "https://openrouter.ai/api/v1",
                        "model": getattr(config, "OPENROUTER_MODEL",
                                         "meta-llama/llama-3.3-70b-instruct:free"),
@@ -56,12 +169,14 @@ def _providers():
                                         "OPENROUTER_MODEL_FALLBACKS", [])),
                        "key": os.environ.get("OPENROUTER_API_KEY", ""),
                        "ok": bool(os.environ.get("OPENROUTER_API_KEY"))},
-        "gemini":    {"kind": "gemini-native", "vision": True,
+        "gemini":    {"kind": "gemini-native", "vision": True, "tools": True,
                       "base": "https://generativelanguage.googleapis.com/v1beta",
-                      "model": config.GEMINI_MODEL,
+                      # a name that Google confirms this key can use,
+                      # resolved once and cached — see _live_gemini_model
+                      "model": _live_gemini_model(),
                       "key": os.environ.get("GEMINI_API_KEY", ""),
                       "ok": bool(os.environ.get("GEMINI_API_KEY"))},
-        "ollama":    {"kind": "openai", "vision": False,
+        "ollama":    {"kind": "openai", "vision": False, "tools": False,
                       "base": config.OLLAMA_URL,
                       "model": config.OLLAMA_MODEL,
                       "key": "ollama", "ok": True},   # probed on use
@@ -111,6 +226,61 @@ def _tools_to_openai(tools):
         "name": t["name"], "description": t.get("description", ""),
         "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
     }} for t in tools]
+
+
+# ── Gemini native tool-calling: JSON-Schema → Gemini function schema ──
+_GTYPE = {"string": "STRING", "number": "NUMBER", "integer": "INTEGER",
+          "boolean": "BOOLEAN", "array": "ARRAY", "object": "OBJECT"}
+
+
+def _clean_gemini_schema(s):
+    """Convert a JSON-Schema property into the OpenAPI subset Gemini's
+    functionDeclarations accept (UPPERCASE types, recursive)."""
+    if not isinstance(s, dict):
+        return {"type": "STRING"}
+    t = s.get("type", "string")
+    if isinstance(t, list):
+        t = t[0] if t else "string"
+    out = {"type": _GTYPE.get(str(t).lower(), "STRING")}
+    if s.get("description"):
+        out["description"] = str(s["description"])[:256]
+    if s.get("enum"):
+        out["enum"] = [str(x) for x in s["enum"]]
+    if out["type"] == "OBJECT":
+        props = s.get("properties") or {}
+        out["properties"] = {k: _clean_gemini_schema(v) for k, v in props.items()}
+        if s.get("required"):
+            out["required"] = list(s["required"])
+    if out["type"] == "ARRAY":
+        out["items"] = _clean_gemini_schema(s.get("items") or {"type": "string"})
+    return out
+
+
+def _tools_to_gemini(tools):
+    """Anthropic-style tool defs → Gemini functionDeclarations. No-arg
+    tools omit 'parameters' (Gemini rejects an empty OBJECT schema)."""
+    decls = []
+    for t in tools:
+        decl = {"name": t["name"],
+                "description": (t.get("description", "") or "")[:1024]}
+        schema = _clean_gemini_schema(t.get("input_schema") or {})
+        if schema.get("properties"):
+            decl["parameters"] = schema
+        decls.append(decl)
+    return [{"function_declarations": decls}]
+
+
+def _render_tool_output(out, limit=3000):
+    """Render a tool's return value into the text the model sees.
+
+    ToolResult renders with an explicit SUCCEEDED/FAILED verdict line so
+    the model never has to infer the outcome from wording. A legacy bare
+    string is passed through unchanged (see tool_result.coerce).
+    """
+    to_model = getattr(out, "to_model", None)
+    if callable(to_model):
+        return to_model(limit)
+    return str(out)[:limit]
 
 
 class UniversalLLM:
@@ -201,6 +371,59 @@ class UniversalLLM:
             except Exception as e:
                 raise ProviderDead(f"bad response: {e} — {r.text[:120]}")
 
+    def _gemini_generate(self, prov, system, contents, gtools, max_tokens):
+        """Low-level Gemini generateContent that returns the candidate's
+        PARTS list (so callers can see functionCall parts, not just text).
+        Model-hops on 'not found', raises ProviderDead on hard failure."""
+        import time
+        models = [prov["model"]] + [
+            m for m in getattr(config, "GEMINI_MODEL_FALLBACKS", [])
+            if m != prov["model"]]
+        last = None
+        for model in models:
+            url = (f"{prov['base']}/models/{model}:generateContent")
+            payload = {"contents": contents,
+                       "generationConfig": {"maxOutputTokens": max_tokens}}
+            if system:
+                payload["systemInstruction"] = {"parts": [{"text": system}]}
+            if gtools:
+                payload["tools"] = gtools
+            r = None
+            for attempt in (1, 2, 3):
+                try:
+                    r = httpx.post(url, json=payload, timeout=90,
+                                   headers={"x-goog-api-key": prov["key"]})
+                except Exception as e:
+                    raise ProviderDead(f"unreachable: {e}")
+                if r.status_code == 429 or r.status_code >= 500:
+                    if attempt < 3:
+                        time.sleep(3 * attempt)
+                        continue
+                    raise ProviderDead(f"HTTP {r.status_code} after retries: "
+                                       f"{r.text[:120]}")
+                break
+            try:
+                data = r.json()
+            except Exception as e:
+                raise ProviderDead(f"non-JSON response: {e}")
+            if isinstance(data, list):
+                data = data[0] if data and isinstance(data[0], dict) else {}
+            err = data.get("error") if isinstance(data, dict) else None
+            if err:
+                msg = err.get("message", str(err)) if isinstance(err, dict) \
+                    else str(err)
+                low = msg.lower()
+                if "not found" in low or "not supported" in low:
+                    last = f"model {model}: {msg[:80]}"
+                    continue
+                raise ProviderDead(f"API error: {msg[:160]}")
+            try:
+                parts = data["candidates"][0]["content"]["parts"]
+                return parts or []
+            except Exception as e:
+                last = f"bad response: {e}"
+        raise ProviderDead(last or "no working Gemini model name")
+
     def _gemini_native_call(self, prov, system, contents, max_tokens):
         """Google's native generateContent API — the one the AQ.-style
         keys are actually for (key= URL parameter, per their console)."""
@@ -262,14 +485,48 @@ class UniversalLLM:
                       smart=False):
         """history: prior turns [{'role','content'(str)}...]
            user_content: str or Anthropic-style block list for THIS turn.
-           execute(name, args) -> str result.
+           execute(name, args) -> ToolResult (or str, legacy).
            compact_system/compact_tools: slimmer variants used for free
            providers whose per-minute token budgets a full-fat request
            can blow single-handedly. Claude gets the full version.
-           Returns dict(text, tools_used, ran_out, provider, error)."""
+           Returns dict(text, tools_used, ran_out, provider, error,
+                        tools_available).
+
+           tools_available is the load-bearing field: False means NO tool
+           could possibly have run this turn, so any action the model
+           describes is fiction by construction. Callers must gate on it."""
         order = [n for n in config.LLM_PROVIDER_ORDER if _providers().get(n)]
         errors = []
-        for name in order:
+        wanted_tools = bool(tools)
+
+        # Tools executed across EVERY provider attempt in this turn.
+        # _loop_with builds its own per-provider list, which is lost when
+        # a provider dies mid-turn after already running a tool — the
+        # caller then sees tools_used=[] for work that genuinely
+        # happened. Wrapping execute here records it once, for real,
+        # regardless of how many brains we cycle through.
+        executed_all = []
+
+        def _execute_tracked(_name, _args):
+            executed_all.append(_name)
+            return execute(_name, _args)
+
+        # PASS 1 — providers that genuinely execute tools.
+        # PASS 2 — text-only providers, and ONLY if no tools were wanted.
+        # A tool-bearing turn never reaches a provider that can't run
+        # tools, because "answered without the tools it needed" is the
+        # exact shape of the hallucination bug.
+        tool_capable = [n for n in order if _providers()[n].get("tools")]
+        text_only = [n for n in order if not _providers()[n].get("tools")]
+        attempt_order = tool_capable + ([] if wanted_tools else text_only)
+
+        if wanted_tools and not tool_capable:
+            return {"text": "", "tools_used": [], "ran_out": False,
+                    "provider": None, "tools_available": False,
+                    "error": "no tool-capable brain is configured (need a "
+                             "GROQ_API_KEY or GEMINI_API_KEY)"}
+
+        for name in attempt_order:
             prov = _providers()[name]
             if not prov["ok"]:
                 errors.append(f"{name}: no API key found in environment")
@@ -282,19 +539,34 @@ class UniversalLLM:
             else:
                 use_system = compact_system or system
                 use_tools = compact_tools if compact_tools is not None else tools
+            # never hand tools to a provider that only pretends to run them
+            if not prov.get("tools"):
+                use_tools = None
             try:
                 result = self._loop_with(name, prov, use_system, history,
-                                         user_content, use_tools, execute,
+                                         user_content, use_tools,
+                                         _execute_tracked,
                                          on_text, max_rounds, smart=smart)
                 self.active_provider = name
                 result["provider"] = name
+                result["tools_available"] = bool(use_tools)
+                # union: this attempt's list plus anything that ran on an
+                # earlier attempt that died before returning
+                seen = list(dict.fromkeys(list(executed_all)
+                                          + list(result.get("tools_used") or [])))
+                result["tools_used"] = seen
                 return result
             except ProviderDead as e:
                 errors.append(f"{name}: {str(e)[:110]}")
                 print(f"[LLM] provider {name} dead → next. ({str(e)[:120]})")
                 continue
-        return {"text": "", "tools_used": [], "ran_out": False,
-                "provider": None,
+
+        # Every tool-capable brain failed on a turn that needed tools.
+        # Answering anyway from a text-only brain would produce exactly
+        # the fabricated "I did it" reply we are eliminating, so we don't.
+        return {"text": "", "tools_used": list(dict.fromkeys(executed_all)),
+                "ran_out": False,
+                "provider": None, "tools_available": False,
                 "error": " | ".join(errors) or "no providers configured"}
 
     def provider_status(self) -> str:
@@ -313,9 +585,19 @@ class UniversalLLM:
             elif name == "ollama":
                 state = f"will try {prov['base']} (local, only if installed)"
             elif name == "gemini":
-                state = ("key found (chat & vision — no tool use)"
-                         if prov["ok"] else
-                         "NO KEY — env var GEMINI_API_KEY not visible to me")
+                if prov["ok"]:
+                    models, err = gemini_available_models()
+                    if models:
+                        state = (f"key found — {len(models)} usable model(s), "
+                                 f"using {prov['model']}")
+                        if config.GEMINI_MODEL not in models:
+                            state += (f"  (config says "
+                                      f"{config.GEMINI_MODEL!r}, which this "
+                                      f"key CANNOT use — auto-switched)")
+                    else:
+                        state = f"key found but no usable models: {err[:90]}"
+                else:
+                    state = "NO KEY — env var GEMINI_API_KEY not visible to me"
             else:
                 envname = "GROQ_API_KEY" if name == "groq" else "OPENROUTER_API_KEY"
                 state = "key found" if prov["ok"] else \
@@ -353,7 +635,7 @@ class UniversalLLM:
                         out = execute(tb.name, tb.input or {})
                         results.append({"type": "tool_result",
                                         "tool_use_id": tb.id,
-                                        "content": str(out)[:3000]})
+                                        "content": _render_tool_output(out)})
                     messages.append({"role": "user", "content": results})
                     continue
                 return {"text": " ".join(text_parts).strip(),
@@ -362,17 +644,46 @@ class UniversalLLM:
                     "ran_out": True, "error": ""}
 
         if prov["kind"] == "gemini-native":
-            # chat & vision, no tool-calling (Groq/Claude handle tools)
+            # chat + vision + NATIVE TOOL-CALLING (Gemini supports function
+            # calling — this lets the smart free brain actually DO things,
+            # not just describe them).
             contents = []
-            for h in history:
+            for h in history[-8:]:
                 contents.append({
                     "role": "model" if h["role"] == "assistant" else "user",
                     "parts": _blocks_to_gemini(h["content"])})
             contents.append({"role": "user",
                              "parts": _blocks_to_gemini(user_content)})
-            text = self._gemini_native_call(prov, system, contents, 1024)
-            return {"text": text, "tools_used": [], "ran_out": False,
-                    "error": ""}
+            gtools = _tools_to_gemini(tools) if tools else None
+            for _ in range(max_rounds):
+                parts = self._gemini_generate(prov, system, contents,
+                                               gtools, 1024)
+                fcalls = [p["functionCall"] for p in parts
+                          if isinstance(p, dict) and "functionCall" in p]
+                texts = [p["text"] for p in parts
+                         if isinstance(p, dict) and p.get("text")]
+                if fcalls:
+                    interim = " ".join(texts).strip()
+                    if interim and on_text:
+                        on_text(interim)
+                    contents.append({"role": "model", "parts": parts})
+                    responses = []
+                    for fc in fcalls:
+                        fname = fc.get("name", "?")
+                        fargs = fc.get("args") or {}
+                        tools_used.append(fname)
+                        out = execute(fname, fargs)
+                        responses.append({"functionResponse": {
+                            "name": fname,
+                            "response": {"result": _render_tool_output(out)}}})
+                    # v1beta REST only accepts roles 'user'/'model' — the
+                    # function result goes back as a 'user' turn.
+                    contents.append({"role": "user", "parts": responses})
+                    continue
+                return {"text": " ".join(texts).strip(),
+                        "tools_used": tools_used, "ran_out": False, "error": ""}
+            return {"text": "", "tools_used": tools_used,
+                    "ran_out": True, "error": ""}
 
         # OpenAI-compatible providers — with model-hopping: if one model
         # is saturated (free lanes get crowded), try the next.
@@ -396,12 +707,25 @@ class UniversalLLM:
                 for _ in range(max_rounds + 2):
                     try:
                         choice = self._openai_call(p2, oa, oa_tools, 1024)
-                    except ToolCallGlitch:
+                    except ToolCallGlitch as e:
                         glitches += 1
+                        # THE BUG THAT CAUSED THE HALLUCINATIONS:
+                        # this used to set `oa_tools = None` and re-ask the
+                        # same question with the tools stripped out. The
+                        # model, now unable to call anything, simply
+                        # described what it would have done — and that
+                        # narration was returned as a normal answer with
+                        # tools_used=[]. Silent, and indistinguishable from
+                        # real work.
+                        #
+                        # A model that cannot emit valid tool syntax is a
+                        # DEAD provider for a tool-bearing turn. Fail over
+                        # to the next tool-capable brain instead of
+                        # quietly downgrading to storytelling.
                         if glitches >= 2:
-                            # model keeps fumbling tool syntax — answer in
-                            # plain words instead of failing the chat
-                            oa_tools = None
+                            raise ProviderDead(
+                                f"could not produce a valid tool call after "
+                                f"{glitches} attempts: {str(e)[:120]}")
                         continue
                     msg = choice.get("message", {})
                     calls = msg.get("tool_calls") or []
@@ -422,7 +746,7 @@ class UniversalLLM:
                             out = execute(tname, targs)
                             oa.append({"role": "tool",
                                        "tool_call_id": c.get("id", ""),
-                                       "content": str(out)[:3000]})
+                                       "content": _render_tool_output(out)})
                         continue
                     return {"text": str(msg.get("content") or "").strip(),
                             "tools_used": tools_used, "ran_out": False,

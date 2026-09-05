@@ -446,14 +446,22 @@ class ShopifyAgent(BaseAgent):
         try:
             data = self._get("products.json", {"limit": 50})
             low = 0
+            tracked = 0
             for p in data.get("products", []):
                 for v in p.get("variants", []):
+                    if not v.get("inventory_management"):
+                        continue                  # not tracked → always sellable
+                    tracked += 1
                     q = v.get("inventory_quantity")
                     if q is not None and q <= config.SHOPIFY_LOW_STOCK:
                         low += 1
-            lines.append(f"  Stock: {low} variant(s) at or below "
-                         f"{config.SHOPIFY_LOW_STOCK}."
-                         if low else "  Stock: healthy.")
+            if not tracked:
+                lines.append("  Stock: not tracked — products are always "
+                             "available to buy.")
+            else:
+                lines.append(f"  Stock: {low} variant(s) at or below "
+                             f"{config.SHOPIFY_LOW_STOCK}."
+                             if low else "  Stock: healthy.")
         except Exception as e:
             lines.append(f"  Stock lookup failed: {e}")
         # autopilot action log (last 24h)
@@ -492,19 +500,49 @@ class ShopifyAgent(BaseAgent):
 
     def _check_low_stock(self):
         data = self._get("products.json", {"limit": 50})
-        low  = []
+        low   = []
+        zero  = 0
+        total = 0
         for p in data.get("products", []):
             for v in p.get("variants", []):
+                # inventory_management is None/"" when "Track quantity" is OFF.
+                # Untracked products are ALWAYS sellable in Shopify, so they
+                # are never "sold out" — skip them (this was the false alarm).
+                if not v.get("inventory_management"):
+                    continue
                 q = v.get("inventory_quantity")
-                if q is not None and q <= config.SHOPIFY_LOW_STOCK:
+                if q is None:
+                    continue
+                total += 1
+                if q <= 0:
+                    zero += 1
+                if q <= config.SHOPIFY_LOW_STOCK:
                     title = p.get("title", "?")
                     vt    = v.get("title", "")
                     label = title if vt in ("Default Title", "") else f"{title} ({vt})"
                     low.append(f"{label}: {q} left")
-        if low:
-            self.say("Stock alert — " + "; ".join(low[:8]), speak=True)
+
+        # Build the message. The ALL-SOLD-OUT case is a business blocker,
+        # not a routine low-stock nudge — say it clearly and actionably.
+        if total and zero == total:
+            msg = ("Heads up, sir — every product shows 0 stock, so customers "
+                   "see 'Sold out' and cannot buy. In Shopify open each product "
+                   "and either set an inventory quantity, or tick 'Continue "
+                   "selling when out of stock' (or turn off 'Track quantity'). "
+                   "No point driving traffic until this is fixed.")
+        elif low:
+            msg = "Stock alert — " + "; ".join(low[:8])
         else:
             self.log("Stock levels healthy.")
+            self._last_stock_msg = ""
+            return
+
+        # don't repeat the same alert every cycle — only speak when it changes
+        if getattr(self, "_last_stock_msg", "") == msg:
+            self.log("Stock unchanged since last alert.")
+            return
+        self._last_stock_msg = msg
+        self.say(msg, speak=True)
 
     # ── on-demand reports (used as Claude tools) ─
     def sales_today(self):
@@ -535,3 +573,27 @@ class ShopifyAgent(BaseAgent):
             return "Shopify is not connected yet, sir."
         self._check_low_stock()
         return self.last_message
+
+    def product_summary(self, limit=12):
+        """Compact list of the store's real products for marketing copy —
+        name, price (ZAR) and a short description. Returns '' if the store
+        isn't connected or has no products, so callers can fall back."""
+        if not self.configured:
+            return ""
+        try:
+            data = self._get("products.json", {"limit": limit})
+        except Exception:
+            return ""
+        lines = []
+        for p in data.get("products", []):
+            title = p.get("title", "").strip()
+            if not title:
+                continue
+            variants = p.get("variants", []) or [{}]
+            price = variants[0].get("price", "")
+            body = re.sub(r"<[^>]+>", " ", p.get("body_html", "") or "")
+            body = re.sub(r"\s+", " ", body).strip()[:160]
+            price_txt = f" — R{price}" if price else ""
+            lines.append(f"- {title}{price_txt}" +
+                         (f": {body}" if body else ""))
+        return "\n".join(lines)

@@ -72,7 +72,7 @@ class Footer(QWidget):
 
         layout.addStretch()
 
-        copyright_lbl = QLabel("\u00a9 2026 JARVIS OS v20")
+        copyright_lbl = QLabel("\u00a9 2026 ALLISON OS")
 
         copyright_lbl.setStyleSheet(
             "border:none; font-size:11px; color:#22d3ee;"

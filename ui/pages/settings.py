@@ -179,7 +179,7 @@ class SettingsPage(QWidget):
             [(True, "On"), (False, "Off")],
             settings.get("voice_enabled"), self._set_voice))
         lay.addWidget(ToggleRow(
-            "Wake word", "Microphone listens for 'hey jarvis'.",
+            "Wake word", "Microphone listens for 'Allison'.",
             [(True, "On"), (False, "Off")],
             settings.get("wake_word_enabled"), self._set_wake))
         root.addWidget(box)

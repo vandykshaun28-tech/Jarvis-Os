@@ -182,9 +182,63 @@ class PCControl:
         return (b64, img.size[0], img.size[1], sw, sh)
 
     def open_url(self, url):
-        if not url.startswith("http"): url = "https://" + url
-        subprocess.Popen(["start", url], shell=True, creationflags=CREATE_NO_WINDOW)
-        return f"Opening {url}, sir."
+        """Open a URL or a local file, and report what actually happened.
+
+        THE BUG THIS FIXES (seen live 2026-08-07): the old version was
+            if not url.startswith("http"): url = "https://" + url
+        so a local file URI like file:///C:/jarvis/websites/x/index.html
+        — which does not start with "http" — became
+            https://file:///C:/jarvis/websites/x/index.html
+        and Chrome went looking for a SERVER NAMED "file", failing with
+        ERR_NAME_NOT_RESOLVED. Allison then reported the site as "built
+        and opened in the browser", because the old code returned a
+        success string unconditionally without ever checking.
+
+        Now: anything that already carries a scheme (file:, http:, https:,
+        mailto: …) is left alone; only a bare domain gets https://. And
+        the return value reflects the real outcome — webbrowser.open()
+        returns a boolean, so a failed launch is reported as a failure
+        instead of being narrated as a success.
+        """
+        import re as _re
+        import webbrowser
+        from urllib.parse import urlparse, unquote
+
+        url = (url or "").strip().strip('"').strip("'")
+        if not url:
+            return "FAILED: no URL given, sir."
+
+        # a scheme looks like  name:  at the very start (RFC 3986)
+        has_scheme = bool(_re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:", url))
+        if not has_scheme:
+            # a bare Windows path is a file, not a domain
+            if _re.match(r"^[a-zA-Z]:[\\/]", url) or url.startswith("\\\\"):
+                try:
+                    url = Path(url).resolve().as_uri()
+                except Exception:
+                    return f"FAILED: not a usable path or URL: {url}"
+            else:
+                url = "https://" + url
+
+        # For local files, confirm the file is actually there BEFORE
+        # claiming to have opened it — "opened" a missing file is a lie
+        # the old code told cheerfully.
+        if url.lower().startswith("file:"):
+            local = unquote(urlparse(url).path)
+            if _re.match(r"^/[a-zA-Z]:", local):      # /C:/x -> C:/x
+                local = local[1:]
+            if not Path(local).exists():
+                return (f"FAILED: nothing to open — {local} does not exist. "
+                        f"I have NOT opened anything.")
+
+        try:
+            ok = webbrowser.open(url)
+        except Exception as e:
+            return f"FAILED to open {url}: {e}"
+        if not ok:
+            return (f"FAILED: the browser refused to open {url}. No window "
+                    f"was opened — do not report this as done.")
+        return f"Opened {url} in the browser, sir."
 
     def google_search(self, query):
         return self.open_url("https://www.google.com/search?q=" + query.replace(" ", "+"))

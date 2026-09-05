@@ -18,6 +18,19 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 
+# ── CRITICAL IMPORT ORDER (Py3.14 + PySide6 + pydantic) ──
+# PySide6 installs a shiboken "feature" import hook that calls
+# inspect.getsource on modules as they import. When anthropic later
+# pulls in pydantic, that hook re-enters pydantic mid-initialisation
+# and throws a circular-import crash. Fully loading pydantic HERE —
+# before PySide6 is ever imported — makes it a cached, finished module
+# so the hook never trips. This one line prevents the whole crash.
+try:
+    import pydantic  # noqa: F401
+    import anthropic  # noqa: F401
+except Exception as _e:
+    print(f"[Startup] pre-import note: {_e}")
+
 
 def _already_running():
     """Single-instance lock — a second launch must never spawn a rival
@@ -37,11 +50,11 @@ def main():
         try:
             import ctypes
             ctypes.windll.user32.MessageBoxW(
-                0, "JARVIS is already running.\n\nLook for the orb icon in "
+                0, "Allison is already running.\n\nLook for the orb icon in "
                    "the system tray (near the clock) and click it.",
-                "JARVIS", 0x40)
+                "ALLISON", 0x40)
         except Exception:
-            print("JARVIS is already running.")
+            print("Allison is already running.")
         sys.exit(0)
 
     from PySide6.QtWidgets import QApplication
@@ -49,7 +62,8 @@ def main():
 
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    # Allison opens as the command centre — maximised, front and centre.
+    window.showMaximized()
     sys.exit(app.exec())
 
 
@@ -72,9 +86,9 @@ if __name__ == "__main__":
             import ctypes
             ctypes.windll.user32.MessageBoxW(
                 0,
-                "JARVIS failed to start.\n\n" + err[-800:] +
+                "Allison failed to start.\n\n" + err[-800:] +
                 "\n\nFull details in C:\\jarvis\\memory\\crash.log",
-                "JARVIS crash", 0x10)
+                "ALLISON crash", 0x10)
         except Exception:
             print(err)
         sys.exit(1)

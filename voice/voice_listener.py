@@ -61,7 +61,11 @@ def device_report() -> str:
 
 
 # ── CONFIG ──────────────────────────────────────
-WAKE_WORDS          = ["hey jarvis", "ok jarvis"]
+# Her name IS the wake word — no "hey". "Allison" (and common
+# mis-hears) wake her. Google STT often returns "allison/alison/
+# allie/madison-ish" variants, so we accept the near-misses too.
+WAKE_WORDS          = ["allison", "alison", "allisson", "alisson",
+                       "hey allison", "ok allison", "alicen", "alyson"]
 SAMPLE_RATE         = 16000
 CHANNELS            = 1
 
@@ -113,7 +117,7 @@ class VoiceListener:
         self.running = True
         self.thread  = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
-        print("[Voice] Listener started. Say 'Hey JARVIS' to activate.")
+        print("[Voice] Listener started. Say 'Allison' to activate.")
 
     def stop(self):
         self.running = False
@@ -266,7 +270,7 @@ class VoiceListener:
 # ── STANDALONE TEST ─────────────────────────────
 if __name__ == "__main__":
     print("Testing JARVIS voice listener...")
-    print("Say 'Hey JARVIS' followed by a command.")
+    print("Say 'Allison' followed by a command.")
     print("Press Ctrl+C to stop.\n")
 
     def on_command(text):

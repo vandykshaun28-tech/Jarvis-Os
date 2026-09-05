@@ -68,6 +68,7 @@ class Sidebar(QWidget):
         super().__init__()
 
         self.expanded = True
+        self.hidden = False
 
         self.buttons = []
 
@@ -245,7 +246,7 @@ class Sidebar(QWidget):
         # Footer status text
         # ------------------------------------------------
 
-        self.footer_label = QLabel("JARVIS OS v20 \u2022 Ready")
+        self.footer_label = QLabel("ALLISON OS \u2022 Ready")
 
         self.footer_label.setStyleSheet(
             "color:#22d3ee; font-size:11px; font-weight:600; "
@@ -356,6 +357,66 @@ class Sidebar(QWidget):
             b.retheme()
 
     # --------------------------------------------------
+
+    # ── HIDE / REVEAL ────────────────────────────────────────────────
+    # The old sidebar only ever collapsed to a 76px icon rail, so it was
+    # always taking up screen. Shaun wants it GONE until he asks for it,
+    # with the HUD clean in between. Width 0 is a genuine hide — the
+    # reveal handle lives in main_window because a button inside a
+    # zero-width widget cannot be clicked.
+
+    HIDDEN_W = 0
+    RAIL_W = 76
+    FULL_W = 256
+
+    def _animate_to(self, width, ms=180):
+        """Slide to a width. Falls back to an instant set if the
+        animation classes are unavailable for any reason."""
+        try:
+            from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+            anim = QPropertyAnimation(self, b"maximumWidth", self)
+            anim.setDuration(ms)
+            anim.setStartValue(self.width())
+            anim.setEndValue(width)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self.setMinimumWidth(0)
+            anim.finished.connect(lambda: self.setFixedWidth(width))
+            anim.start()
+            self._anim = anim            # keep a ref or it is GC'd mid-flight
+        except Exception:
+            self.setFixedWidth(width)
+
+    def hide_sidebar(self, animate=True):
+        """Fully out of the way."""
+        self.hidden = True
+        if animate:
+            self._animate_to(self.HIDDEN_W)
+        else:
+            self.setFixedWidth(self.HIDDEN_W)
+
+    def reveal_sidebar(self, full=True, animate=True):
+        """Bring it back, expanded by default so he can read it."""
+        self.hidden = False
+        self.expanded = full
+        for b in self.buttons:
+            b.expand() if full else b.collapse()
+        for w in (self.footer_label, self.divider, self.sys_label,
+                  *self.status_rows):
+            w.show() if full else w.hide()
+        self.toggle.setText("\u00ab" if full else "\u00bb")
+        target = self.FULL_W if full else self.RAIL_W
+        if animate:
+            self._animate_to(target)
+        else:
+            self.setFixedWidth(target)
+
+    def toggle_hidden(self):
+        """What the edge handle calls."""
+        if getattr(self, "hidden", False):
+            self.reveal_sidebar(full=True)
+        else:
+            self.hide_sidebar()
+        return not self.hidden
 
     def toggle_sidebar(self):
 

@@ -62,7 +62,7 @@ class Worker(QObject):
                 url = start_phone_server(self.brain)
                 if url:
                     self.progress.emit(
-                        f"[Phone] Pocket JARVIS is live, sir — open {url} "
+                        f"[Phone] Allison is live on your phone, sir — open {url} "
                         f"on your phone (same Wi-Fi) and enter your key.")
             except Exception as e:
                 print(f"[Phone] server failed: {e}")

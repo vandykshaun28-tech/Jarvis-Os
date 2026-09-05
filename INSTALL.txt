@@ -1,0 +1,57 @@
+ALLISON — TOOL-EXECUTION CORE REBUILD
+=====================================
+
+WHAT TO DO
+----------
+1. Unzip into C:\jarvis, overwriting when asked:
+
+     cd $HOME\Downloads
+     Expand-Archive .\allison_toolcore.zip -DestinationPath C:\jarvis -Force
+
+2. Add these two lines to the END of C:\jarvis\config.py
+   (they are NOT in the zip — config.py is never shipped, so your
+   PHONE_KEY and credit settings are not touched):
+
+     SITES_DIR       = ROOT_DIR / "sites"
+     DEBUG_TOOL_GATE = False
+
+3. Verify the rebuild:
+
+     cd C:\jarvis
+     .\.venv\Scripts\python.exe verify_toolcore.py
+
+   Expect: RESULT: 44 passed, 0 failed
+
+4. Prove the Shopify tool against your REAL store:
+
+     .\.venv\Scripts\python.exe -m tools.shopify_tool
+
+   Paste me the whole output. If a call fails it will name the exact
+   reason — wrong scope, wrong API version, bad token. Those are real
+   findings, not bugs in the tool.
+
+5. Prove the website tool writes real files:
+
+     .\.venv\Scripts\python.exe -m tools.website_tool
+
+   Then look in C:\jarvis\sites\allison-selftest\ — the files are
+   really there.
+
+6. Start Allison normally:
+
+     .\.venv\Scripts\python.exe main_v20.py
+
+
+WHAT CHANGED
+------------
+brain/tool_result.py   NEW  every tool returns a real verdict
+brain/tool_gate.py     NEW  only relevant tools exposed per turn
+brain/llm.py           FIX  no more silent tool-stripping; providers
+                            that fake tool support are locked out
+brain/brain.py         FIX  ledger uses real status; honesty gate reads
+                            evidence instead of regexing her own prose
+tools/shopify_tool.py  NEW  real Admin API, paginated, writes confirmed
+tools/website_tool.py  NEW  real file writes, hash-verified on disk
+
+Your keys.py and config.py are untouched.
+The phone / Tailscale path is unchanged and was tested live.

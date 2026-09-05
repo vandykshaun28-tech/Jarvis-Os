@@ -4,21 +4,23 @@ Components call pal() when styling; MainWindow.apply_theme() switches
 the current palette and asks each themed component to retheme().
 """
 
+# ALLISON's signature — JARVIS electric cyan-blue on near-black.
+# Clean, minimal, "arc-reactor" holographic (Huw-Prosser / Iron-Man look).
 DARK = {
     "name": "dark",
-    "canvas": "#081324",          # backdrop base
-    "grid": (34, 211, 238),       # backdrop gridline rgb
-    "panel": "#0a1420",           # cards / sidebar / header
-    "panel2": "#0d1e2e",          # buttons, inputs
-    "line": "#12324a",            # borders
-    "accent": "#22d3ee",
-    "text": "#e8f6ff",
-    "text2": "#7ba7c2",
-    "dim": "#5a8bb0",
-    "bubble_you_bg": "rgba(34,211,238,0.10)",
-    "bubble_you_border": "rgba(34,211,238,0.30)",
-    "bubble_ai_bg": "#0c1826",
-    "code_bg": "#04121f",
+    "canvas": "#02060d",          # backdrop base (near-black blue)
+    "grid": (46, 130, 190),       # backdrop gridline rgb (deep cyan-blue)
+    "panel": "#08131f",           # cards / sidebar / header
+    "panel2": "#0c1c2b",          # buttons, inputs
+    "line": "#123048",            # borders
+    "accent": "#3dd8ff",          # electric cyan-blue — arc-reactor
+    "text": "#dff2ff",
+    "text2": "#7fa6c2",
+    "dim": "#4d6b82",
+    "bubble_you_bg": "rgba(61,216,255,0.12)",
+    "bubble_you_border": "rgba(61,216,255,0.34)",
+    "bubble_ai_bg": "#0a1622",
+    "code_bg": "#061019",
 }
 
 LIGHT = {
@@ -43,6 +45,7 @@ _current = DARK
 # user-selectable accent colours (label -> hex). Applied on top of the
 # base dark/light palette so the whole UI + orb recolour together.
 ACCENTS = {
+    "Arc":     "#3dd8ff",   # JARVIS electric cyan-blue (default)
     "Cyan":    "#22d3ee",
     "Emerald": "#22e39a",
     "Violet":  "#a855f7",

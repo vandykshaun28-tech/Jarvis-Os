@@ -56,6 +56,15 @@ VAULT_PATH = Path(os.environ.get(
 CLAUDE_MODEL      = "claude-sonnet-4-6"            # SMART tier
 CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"    # FAST tier (default)
 
+# ── Credit balance countdown ────────────────────
+# Anthropic's API has no "check my balance" endpoint, so JARVIS counts
+# DOWN from the credits you last loaded. Whenever you top up (or want
+# to re-sync), look at console.anthropic.com → Billing, and set this
+# to the credits showing there. JARVIS subtracts every real token cost
+# from that moment on and shows what's left in the header.
+# 0 = feature off (no balance pill).
+CREDIT_BALANCE_USD = 0.0
+
 # Pricing in USD per million tokens (input, output) — as of July 2026.
 # Anthropic occasionally changes these; check console.anthropic.com/
 # settings/billing or docs.claude.com/en/docs/about-claude/pricing if
@@ -72,7 +81,12 @@ CLAUDE_PRICING = {
 #   Gemini: aistudio.google.com/apikey → set env var GEMINI_API_KEY
 # Ollama = fully local & free forever (install from ollama.com), used
 # last if it's running.
-LLM_PROVIDER_ORDER = ["anthropic", "groq", "gemini", "openrouter", "ollama"]
+# Allison's brains, tried in this order. FREE brains lead now — Groq
+# (fast, smart 70B) and Gemini (free vision) carry her at zero cost and
+# zero RAM. Anthropic sits LAST so she never wastes a call on it while
+# credits are $0; the moment Shopify funds it, move "anthropic" to the
+# front and she gains the heavy reasoning + real screen vision back.
+LLM_PROVIDER_ORDER = ["groq", "gemini", "openrouter", "ollama", "anthropic"]
 GROQ_MODEL           = "llama-3.3-70b-versatile"
 GROQ_MODEL_FALLBACKS = ["llama-3.1-8b-instant"]   # higher free limits
 OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
@@ -94,6 +108,13 @@ GEMINI_MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-flash-latest",
                           "gemini-3.5-flash", "gemini-3.1-flash-lite"]
 OLLAMA_MODEL = "qwen2.5:7b"
 OLLAMA_URL   = "http://localhost:11434/v1"
+
+# ── Identity ────────────────────────────────────
+# She is ALLISON now — a woman, Shaun's command-centre AI. Her name is
+# also her wake word (just say "Allison", no "hey"). The folder, files
+# and modules keep the 'jarvis' names on purpose — only the persona,
+# voice and displayed name change.
+ASSISTANT_NAME = "Allison"
 
 # ── Personal ────────────────────────────────────
 OWNER_NAME = "Shaun"
@@ -129,7 +150,9 @@ MIND_QUIET_END         = 6
 #           film JARVIS). "sapi": offline Windows voice. Neural falls
 #           back to SAPI automatically if the internet is down.
 VOICE_ENGINE = "neural"
-VOICE_NAME   = "en-GB-RyanNeural"   # try en-GB-ThomasNeural, en-US-GuyNeural
+# Allison's voice — a warm British female neural voice. Alternatives:
+# en-GB-LibbyNeural, en-US-AriaNeural, en-US-JennyNeural, en-AU-NatashaNeural
+VOICE_NAME   = "en-GB-SoniaNeural"
 VOICE_RATE   = "+4%"                # speaking speed tweak
 
 # Webcam for JARVIS's eyes (camera.py) — 0 = default camera
@@ -146,25 +169,7 @@ MIC_DEVICE_NAME  = ""
 # (legacy fallback — only used if MIC_DEVICE_NAME is empty)
 MIC_DEVICE_INDEX = None
 
-CREDIT_BALANCE_USD = 25.00   # synced after top-up
+SITES_DIR       = ROOT_DIR / "sites"
+DEBUG_TOOL_GATE = False
 
-CREDIT_BALANCE_USD = 6.00   # synced after top-up
-
-GOOGLE_ACCOUNT = 'vandykshaun28@gmail.com'
-
-# -- autopilot: secrets come from keys.py (never committed to git) --
-try:
-    import keys as _k
-    for _n in ("SHOPIFY_STORE", "SHOPIFY_TOKEN", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"):
-        _v = (getattr(_k, _n, "") or "").strip()
-        if _v:
-            globals()[_n] = _v
-            os.environ[_n] = _v
-except ImportError:
-    pass
-SHOPIFY_AUTO_FULFIL  = False      # set True when you trust him to fulfil
-AUTOPILOT_REPLY_MODE = "approve"  # "auto" later, when his drafts earn it
-
-PHONE_KEY = 'shaun-2026-secret'
-
-PHONE_KEY = 'shaun-2026-secret'
+SHOPIFY_API_VERSION = "2025-10"

@@ -18,7 +18,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QPlainTextEdit, QScrollArea, QFrame, QSizePolicy,
-    QApplication,
+    QApplication, QFileDialog,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 
@@ -138,11 +138,11 @@ class Bubble(QFrame):
                      f"border:1px solid {p['bubble_you_border']};"
                      f"border-radius:12px;}}")
         elif self.kind == "mind":
-            who, who_col = "JARVIS · MIND", "#c084fc"
+            who, who_col = "ALLISON · MIND", "#c084fc"
             frame = (f"QFrame{{background:{p['bubble_ai_bg']};"
                      f"border:1px solid #7c5cbf55;border-radius:12px;}}")
         else:
-            who, who_col = "JARVIS", p["accent"]
+            who, who_col = "ALLISON", p["accent"]
             frame = (f"QFrame{{background:{p['bubble_ai_bg']};"
                      f"border:1px solid {p['line']};border-radius:12px;}}")
         self.setStyleSheet(frame)
@@ -168,10 +168,11 @@ class ChatInput(QPlainTextEdit):
 
     def __init__(self):
         super().__init__()
-        self.setPlaceholderText("Message JARVIS — or drop files here…")
+        self.setPlaceholderText("Message Allison…  📎 attach · Ctrl+V paste · drag files in")
         self.setAcceptDrops(False)          # Console handles drops itself
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setTabChangesFocus(True)
+        self._sizing = False
         self.setFixedHeight(self.MIN_H)
         self.textChanged.connect(self._autosize)
 
@@ -184,11 +185,93 @@ class ChatInput(QPlainTextEdit):
         super().keyPressEvent(event)
 
     def _autosize(self):
-        lines = min(self.MAX_LINES, max(1, self.document().blockCount()))
-        self.setFixedHeight(max(self.MIN_H, 26 + lines * 18))
-        self.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded if self.document().blockCount()
-            > self.MAX_LINES else Qt.ScrollBarAlwaysOff)
+        """Grow to fit the real rendered text, wrapping included.
+
+        HISTORY, because I got this wrong twice and cost Shaun the
+        ability to type both times:
+
+        v1 counted document().blockCount() — HARD newlines only — so one
+        long wrapped sentence stayed one line tall.
+
+        v2 called document().setTextWidth() and read doc.size().height().
+        That is the API for a QTextDocument with the DEFAULT layout.
+        QPlainTextEdit uses QPlainTextDocumentLayout, which does not
+        support textWidth at all, and whose documentSize().height()
+        returns a count of LINES, not pixels. Calling it corrupted the
+        widget: no placeholder, no keystrokes.
+
+        v3 (this) asks the plain-text layout the question it actually
+        answers — how many display lines are there, wrapping included —
+        and multiplies by the font's line spacing. No setTextWidth.
+
+        If any of that misbehaves, fall back to the v1 measurement,
+        which was merely imperfect rather than broken. A composer that
+        does not grow is an annoyance; one that will not accept typing
+        is unusable, and I have now shipped the second twice.
+        """
+        # ESCAPE HATCH. Set CHAT_INPUT_AUTOGROW = False in config.py to
+        # switch this off entirely and keep a plain fixed-height box.
+        # After breaking the composer twice, Shaun should not need me to
+        # ship a patch before he can type again.
+        try:
+            import config as _cfg
+            if not getattr(_cfg, "CHAT_INPUT_AUTOGROW", True):
+                if self.height() != self.MIN_H:
+                    self.setFixedHeight(self.MIN_H)
+                return
+        except Exception:
+            pass
+
+        if getattr(self, "_sizing", False):
+            return
+        self._sizing = True
+        try:
+            doc = self.document()
+            lines = None
+            try:
+                layout = doc.documentLayout()
+                # QPlainTextDocumentLayout reports height IN LINES and
+                # already accounts for word wrap at the viewport width.
+                size = layout.documentSize()
+                if size is not None and size.height() >= 1:
+                    lines = float(size.height())
+            except Exception:
+                lines = None
+            if not lines or lines < 1:
+                lines = float(max(1, doc.blockCount()))   # proven fallback
+
+            line_h = max(14, self.fontMetrics().lineSpacing())
+            shown = max(1.0, min(lines, float(self.MAX_LINES)))
+            needed = int(shown * line_h) + 18              # padding + frame
+            target = max(self.MIN_H, needed)
+
+            if target != self.height():
+                self.setFixedHeight(target)
+
+            want = (Qt.ScrollBarAsNeeded if lines > self.MAX_LINES
+                    else Qt.ScrollBarAlwaysOff)
+            if self.verticalScrollBarPolicy() != want:
+                self.setVerticalScrollBarPolicy(want)
+        except Exception as e:
+            # never leave the composer in a broken state
+            print(f"[ChatInput] autosize fell back: {e}")
+            try:
+                n = min(self.MAX_LINES, max(1, self.document().blockCount()))
+                self.setFixedHeight(max(self.MIN_H, 26 + n * 18))
+            except Exception:
+                pass
+        finally:
+            self._sizing = False
+
+    def resizeEvent(self, event):
+        # Re-measure only when the WIDTH changed — wrapping depends on
+        # width. Reacting to a height change would chase our own tail.
+        super().resizeEvent(event)
+        try:
+            if event.oldSize().width() != event.size().width():
+                self._autosize()
+        except Exception:
+            pass
 
     # Ctrl+V with an image or copied files → attachment, not text
     def insertFromMimeData(self, source):
@@ -248,7 +331,7 @@ class Console(QWidget):
             self.mute_btn.setStyleSheet(
                 f"QPushButton{{background:#2a1520;border:1px solid #ff5566aa;"
                 f"border-radius:6px;color:#ff5566;font-size:11px;}}")
-            self.mute_btn.setToolTip("JARVIS is muted — click to give him "
+            self.mute_btn.setToolTip("Allison is muted — click to give her "
                                      "his voice back")
         else:
             self.mute_btn.setText("🔊")
@@ -375,6 +458,21 @@ class Console(QWidget):
         # composer — multi-line, paste-aware
         row = QHBoxLayout()
         row.setSpacing(8)
+
+        # 📎 attach button — opens a file picker (photos, docs, anything)
+        attach = QPushButton("📎")
+        attach.setFixedSize(38, 38)
+        attach.setCursor(Qt.PointingHandCursor)
+        attach.setToolTip("Attach photos or files (you can also paste with "
+                          "Ctrl+V or drag them in)")
+        attach.setStyleSheet(
+            f"QPushButton{{background:#0d1e2e;border:1px solid {LINE};"
+            f"border-radius:10px;color:{CYAN};font-size:16px;}}"
+            f"QPushButton:hover{{border:1px solid {CYAN};}}")
+        attach.clicked.connect(self._pick_files)
+        self._attach_btn = attach
+        row.addWidget(attach)
+
         self.input = ChatInput()
         self.input.submitted.connect(self.submit)
         self.input.pastedFiles.connect(self._attach_files)
@@ -402,7 +500,7 @@ class Console(QWidget):
             f"border-radius:12px;}}"
             f"QWidget{{background:transparent;border:none;}}")
 
-        self.append_system("JARVIS Console Online.")
+        self.append_system("ALLISON Console Online.")
 
     def _smooth_to_bottom(self, _min, mx):
         bar = self.scroll.verticalScrollBar()
@@ -433,6 +531,12 @@ class Console(QWidget):
                f"color:{p['accent']};}}")
         for b in (self.copy_btn, self.collapse_btn, self.mute_btn):
             b.setStyleSheet(btn)
+        if hasattr(self, "_attach_btn"):
+            self._attach_btn.setStyleSheet(
+                f"QPushButton{{background:{p['panel2']};border:1px solid "
+                f"{p['line']};border-radius:10px;color:{p['accent']};"
+                f"font-size:16px;}}"
+                f"QPushButton:hover{{border:1px solid {p['accent']};}}")
         self.stop_btn.setStyleSheet(
             f"QPushButton{{background:{p['panel2']};border:1px solid "
             f"{p['line']};border-radius:6px;color:{p['dim']};font-size:11px;}}"
@@ -481,14 +585,14 @@ class Console(QWidget):
             self.input.setPlaceholderText("Drop it — I'll take a look, sir.")
 
     def dragLeaveEvent(self, event):
-        self.input.setPlaceholderText("Message JARVIS — or drop files here…")
+        self.input.setPlaceholderText("Message Allison — or drop files here…")
 
     def dropEvent(self, event):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if path and os.path.isfile(path) and path not in self.attachments:
                 self.attachments.append(path)
-        self.input.setPlaceholderText("Message JARVIS — or drop files here…")
+        self.input.setPlaceholderText("Message Allison — or drop files here…")
         self._refresh_chips()
         self.input.setFocus()
 
@@ -602,7 +706,7 @@ class Console(QWidget):
     def append_response(self, text):
         self._receipt_chip = None
         text = str(text)
-        self._log("JARVIS", text)
+        self._log("ALLISON", text)
         kind = "mind" if text.startswith("[Mind]") else "jarvis"
         self._add(Bubble(text, kind), "left")
 
@@ -612,6 +716,16 @@ class Console(QWidget):
             if p not in self.attachments:
                 self.attachments.append(p)
         self._refresh_chips()
+
+    def _pick_files(self, *_):
+        """Open a file picker — the obvious 'attach' button, like a real
+        chat box. Paste (Ctrl+V) and drag-and-drop still work too."""
+        paths, _flt = QFileDialog.getOpenFileNames(
+            self, "Attach photos or files", "",
+            "All files (*.*);;Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp)")
+        if paths:
+            self._attach_files(paths)
+            self.input.setFocus()
 
     # ── submit ──────────────────────────────────
     def submit(self):

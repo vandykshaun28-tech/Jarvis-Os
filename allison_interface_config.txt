@@ -1,0 +1,14 @@
+"""
+# Allison Interface Configuration
+"""
+
+# Color Scheme
+primary_color = "blue"
+secondary_color = "white"
+
+# Layout
+show_conversation_history = True
+show_tool_output = True
+
+# Customization
+allow_user_customization = True

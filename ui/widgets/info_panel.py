@@ -51,7 +51,7 @@ class InfoPanel(QFrame):
         lay.setSpacing(6)
 
         top = QHBoxLayout()
-        self.title_label = QLabel("JARVIS")
+        self.title_label = QLabel("ALLISON")
         self.title_label.setStyleSheet(
             "color:#22d3ee;font-size:10px;font-weight:700;"
             "letter-spacing:1px;border:none;background:transparent;")

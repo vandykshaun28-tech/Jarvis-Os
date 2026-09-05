@@ -1,0 +1,56 @@
+ALLISON — PATCH 2 (fixes found by YOUR real-store run)
+======================================================
+
+INSTALL
+-------
+  cd $HOME\Downloads
+  Expand-Archive .\allison_fix.zip -DestinationPath C:\jarvis -Force
+
+Then re-run all three:
+  cd C:\jarvis
+  .\.venv\Scripts\python.exe verify_toolcore.py       -> 44 passed
+  .\.venv\Scripts\python.exe -m tools.shopify_tool    -> now 3/3
+  .\.venv\Scripts\python.exe -m tools.website_tool    -> 5/5, no litter
+
+
+WHAT WAS WRONG
+--------------
+1. verify_toolcore.py crashed on Windows. It read brain.py without
+   specifying UTF-8, and Windows defaulted to cp1252, which chokes on
+   the em-dashes in the comments. Fixed.
+
+2. shopify_traffic was MY bug, not your store's. I guessed the ShopifyQL
+   GraphQL schema and got it wrong three ways:
+      - response type is ShopifyqlQueryResponse, not a TableResponse union
+      - parseErrors is a list of Strings, not objects
+      - the field is 'rows', not 'rowData'
+   Corrected against Shopify's published schema.
+
+3. Worse than the broken query: it then TOLD you the cause was a missing
+   'read_analytics' scope. That was a guess, it was wrong, and it isn't
+   even the right scope name (ShopifyQL uses read_reports). The tool
+   correctly said FAILED - but the explanation I stapled to it was
+   invented. That is the same disease we just cured in Allison, so it is
+   named in the code rather than quietly deleted.
+
+4. Sessions/visitors are NOT available from Shopify's Admin API at any
+   scope - they only exist in the admin analytics UI. So the tool now
+   returns real sales-by-day from ShopifyQL and states plainly that
+   visitor counts cannot be fetched. For real traffic numbers: GA4 or
+   the Shopify dashboard.
+
+5. Successful calls reported "http: None" because the pagination helper
+   never recorded the status code. Fixed.
+
+6. The API-version probe silently failed (bad URL). Fixed - the selftest
+   will now print which versions your store accepts, so you'll know when
+   2024-01 is retired before it breaks.
+
+7. YOUR STORE, REAL FINDING: all 6 variants have inventory tracking
+   switched OFF (tracked_variants: 0). So "0 at or below 5 in stock"
+   meant "I cannot see stock at all", not "stock is healthy". The tool
+   now says which of the two it is. To enable it: Shopify admin ->
+   Products -> variant -> tick "Track quantity".
+
+8. The website selftest left a stray etc-allison-escape folder in
+   C:\jarvis\sites. It cleans up after itself now - delete that folder.

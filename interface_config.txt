@@ -1,0 +1,14 @@
+// Custom interface configuration file
+
+// Color scheme
+primary_color = #3498db
+secondary_color = #f1c40f
+background_color = #2c3e50
+
+text_color = #ecf0f1
+header_color = #e74c3c
+
+// Layout
+interface_width = 800px
+interface_height = 600px
+font_size = 14px

@@ -12,11 +12,13 @@ SETTINGS_FILE = config.MEMORY_DIR / "settings.json"
 
 DEFAULTS = {
     "theme": "dark",           # dark | light
-    "accent": "Cyan",          # accent colour name (see theme_manager.ACCENTS)
-    "voice_enabled": True,     # JARVIS speaks replies
-    "wake_word_enabled": True, # mic listens for "hey jarvis"
+    "accent": "Arc",           # JARVIS cyan-blue (see theme_manager.ACCENTS)
+    "voice_enabled": True,     # Allison speaks replies
+    "wake_word_enabled": True, # mic listens for "allison"
     "brain_mode": "auto",      # auto (Haiku default, Sonnet for heavy) | smart (always Sonnet)
-    "mini_tabs": True,         # auto pop-up info panels
+    "mini_tabs": False,        # auto pop-up info panels — OFF by default
+                               # (they were popping on every answer); the
+                               # study progress bar still shows regardless.
 }
 
 _lock = threading.Lock()
@@ -34,6 +36,11 @@ def load() -> dict:
                         SETTINGS_FILE.read_text(encoding="utf-8")))
             except Exception as e:
                 print(f"[Settings] load failed: {e}")
+            # migrate older defaults to the JARVIS cyan-blue ("Arc") so her
+            # look matches Huw's Jarvis (Shaun can still pick any accent in
+            # Settings afterwards).
+            if data.get("accent") in ("Cyan", "Violet"):
+                data["accent"] = "Arc"
             _cache = data
         return dict(_cache)
 

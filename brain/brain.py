@@ -17,6 +17,68 @@ for _p in [_root_dir, _brain_dir]:
         sys.path.insert(0, _p)
 
 import config
+# NOTE ON IMPORT STYLE — this caused a hard crash on 2026-08-07.
+# `from brain import tool_result` requires the `brain` PACKAGE object to
+# already carry `tool_result` as an attribute. While the package is still
+# initialising (anything that reaches brain.brain before brain/__init__
+# has finished) that attribute does not exist yet, and Python raises
+# "cannot import name 'tool_result' from partially initialized module".
+# Importing the SUBMODULE directly sidesteps the package attribute
+# entirely and is safe under partial initialisation. Do not "tidy" these
+# back into `from brain import x`.
+try:
+    # TOP LEVEL, next to config.py — the one place proven reachable no
+    # matter how this file was loaded. `from brain.x import ...` broke on
+    # Shaun's PC because core/worker.py loads brain.py by file path, so
+    # `brain` in sys.modules was the MODULE, not the package, and every
+    # brain.* import died with "'brain' is not a package".
+    from tool_result import ToolResult, coerce as _coerce
+    from tool_gate import gate as _gate_tools, explain as _gate_explain
+except ImportError:
+    # Belt and braces. core/worker.py loads THIS FILE by path via
+    # spec_from_file_location("JarvisBrainModule", ...), so brain.py does
+    # not necessarily run as `brain.brain`, and `brain` in sys.modules is
+    # not guaranteed to be the package. If the package route fails for
+    # any reason, load the two siblings straight off disk from the same
+    # directory as this file. No package resolution involved.
+    import importlib.util as _ilu
+    import os as _os
+
+    import sys as _sys
+
+    def _load_sibling(_name):
+        _here = _os.path.dirname(_os.path.abspath(__file__))
+        _path = _os.path.join(_os.path.dirname(_here), _name + ".py")
+        if not _os.path.exists(_path):            # older layout
+            _path = _os.path.join(_here, _name + ".py")
+        _key = "_allison_" + _name
+        if _key in _sys.modules:
+            return _sys.modules[_key]
+        _spec = _ilu.spec_from_file_location(_key, _path)
+        _mod = _ilu.module_from_spec(_spec)
+        # MUST be registered BEFORE exec_module. tool_result declares a
+        # @dataclass under `from __future__ import annotations`, so its
+        # annotations are strings that dataclasses resolves through
+        # sys.modules[cls.__module__].__dict__. If the module is not in
+        # sys.modules yet, that lookup returns None and the import dies
+        # with "'NoneType' object has no attribute '__dict__'" — a far
+        # more baffling crash than the one this fallback exists to fix.
+        # Found by deliberately poisoning sys.modules['brain'] to force
+        # this path, which is the only way it ever gets exercised.
+        _sys.modules[_key] = _mod
+        try:
+            _spec.loader.exec_module(_mod)
+        except Exception:
+            _sys.modules.pop(_key, None)
+            raise
+        return _mod
+
+    _trm = _load_sibling("tool_result")
+    _gtm = _load_sibling("tool_gate")
+    ToolResult   = _trm.ToolResult
+    _coerce      = _trm.coerce
+    _gate_tools  = _gtm.gate
+    _gate_explain = _gtm.explain
 from agents.system_agent import SystemAgent
 
 # ── MemoryStore (load directly to avoid memory.py clash) ──
@@ -30,7 +92,17 @@ _mem_mod    = _load("_mem", os.path.join(_root_dir, "memory", "memory.py"))
 MemoryStore = _mem_mod.MemoryStore
 
 # ── Anthropic ───────────────────────────────────
-from anthropic import Anthropic
+# Defensive: on Py3.14 + PySide6, importing anthropic (→ pydantic) can
+# hit a shiboken import-hook circular-import. main_v20.py pre-imports
+# pydantic before Qt to prevent it; this try/except is the last net —
+# if anthropic still won't load, Allison runs on the FREE brains
+# (Groq/Gemini) which is her default now anyway.
+try:
+    from anthropic import Anthropic
+except Exception as _anthr_err:
+    print(f"[Brain] Anthropic unavailable ({_anthr_err}) — "
+          f"running on free brains only.")
+    Anthropic = None
 
 # ── ObsidianBridge ──────────────────────────────
 try:
@@ -144,6 +216,27 @@ class JarvisBrain:
         self.conversation_history = []
         self.voice_callback       = voice_callback
         self.chat_callback        = chat_callback
+
+        # ── THE ONE CONVERSATION ─────────────────────────────────────
+        # conversation_history above is what the MODEL sees. This is
+        # what the HUMANS see, and it is shared: the desk and the phone
+        # are two windows onto this single transcript rather than two
+        # separate logs that drift apart. Anything either device says
+        # lands here with an id, so the other device can catch up
+        # without a refresh.
+        try:
+            from core.session import SharedSession
+            self.session = SharedSession(config.MEMORY_DIR / "session.json")
+        except Exception as e:
+            print(f"[Brain] shared session unavailable: {e}")
+            self.session = None
+
+        # every ToolResult produced during the CURRENT turn — the
+        # evidence the honesty gate checks before letting a reply out
+        self._last_tool_results   = []
+        # pending destructive actions awaiting a yes from Shaun,
+        # keyed by confirm token
+        self._pending_confirms    = {}
 
         # ── real activity ledger — records what ACTUALLY happened,
         #    straight from tool executions, never from words ──
@@ -265,18 +358,264 @@ class JarvisBrain:
                 f"signup (it needs a real person + card), then I run the store "
                 f"from there.")
 
+    # ── MARKETING-IN-A-BOX — Allison writes ready-to-post ads,
+    #    captions, product copy and a week of content. Pure writing, so
+    #    it works on ANY brain (Claude OR free fallback) — no credits,
+    #    no vision. She writes it; Shaun pastes it. This is her real
+    #    marketing power today. ──
+    def build_marketing(self, brief: str = "") -> str:
+        brief = (brief or "").strip()
+        # pull live store facts if we have them, so the copy is about the
+        # ACTUAL products, not invented ones.
+        store_ctx = ""
+        try:
+            s = self.agent_manager.get("shopify") if self.agent_manager else None
+            if s and hasattr(s, "product_summary"):
+                store_ctx = s.product_summary() or ""
+        except Exception:
+            store_ctx = ""
+        if not brief and store_ctx:
+            brief = "Market my live Shopify store and its products."
+        if not brief:
+            brief = ("Market my online store to South African shoppers and "
+                     "get the first sales.")
+
+        if self.chat_callback:
+            self.chat_callback("→ build_marketing")
+        self.current_activity = "writing your marketing"
+        self.log_activity("build_marketing", brief[:80])
+
+        sysp = ("You are Allison — Shaun Van Dyk's sharp, creative marketing "
+                "director. Shaun sells in South Africa; price in ZAR (R) and "
+                "speak to SA shoppers. Write copy that is punchy, specific and "
+                "READY TO PASTE — no 'consider' or 'you could', give him the "
+                "actual words. Use scroll-stopping hooks, clear offers and a "
+                "call to action. Keep hashtags realistic for a small SA store.")
+        ctx = f"\n\nHIS ACTUAL STORE / PRODUCTS:\n{store_ctx}" if store_ctx else ""
+        try:
+            social = self.llm.simple(sysp,
+                f"Brief: {brief}{ctx}\n\nWrite 5 ready-to-post SOCIAL ADS "
+                f"(Facebook/Instagram). For each: a scroll-stopping hook line, "
+                f"2-3 lines of body, a clear call to action, and 4-6 hashtags. "
+                f"Number them 1-5.", max_tokens=900)
+            captions = self.llm.simple(sysp,
+                f"Brief: {brief}{ctx}\n\nWrite 7 short punchy CAPTIONS (one per "
+                f"day for a week) a small store can post daily — mix product "
+                f"spotlights, a special offer, social proof, and a behind-the-"
+                f"scenes. Keep each under 220 characters with 2-4 hashtags.",
+                max_tokens=700)
+            plan = self.llm.simple(sysp,
+                f"Brief: {brief}{ctx}\n\nWrite a simple 7-DAY LAUNCH MARKETING "
+                f"PLAN: what to post each day and 3 FREE ways to drive the first "
+                f"traffic (Facebook groups, WhatsApp status, marketplace). "
+                f"Numbered, concrete, no fluff.", max_tokens=700)
+        except Exception as e:
+            return (f"I couldn't reach a brain to write the marketing, sir: {e}. "
+                    f"Type 'test brains' to see which are live.")
+
+        from datetime import datetime as _dt
+        stamp = _dt.now().strftime("%Y-%m-%d %H:%M")
+        md = (f"# Your Marketing Pack\n"
+              f"*Written by Allison — {stamp}*\n\n"
+              f"> Brief: {brief}\n\n"
+              f"---\n\n## 1. Social Ads (paste & post)\n\n{social}\n\n"
+              f"---\n\n## 2. A Week of Daily Captions\n\n{captions}\n\n"
+              f"---\n\n## 3. 7-Day Launch Plan\n\n{plan}\n")
+        try:
+            d = config.ROOT_DIR / "marketing"
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / f"marketing_{_dt.now().strftime('%Y%m%d_%H%M%S')}.md"
+            path.write_text(md, encoding="utf-8")
+            if self.pc:
+                self.pc.open_anything(str(path))
+            self.show_panel("marketing", "YOUR MARKETING PACK", md)
+            where = str(path)
+        except Exception as e:
+            where = f"(couldn't save the file: {e})"
+        return (f"Done, sir — I've written your full marketing pack and put it "
+                f"on screen: 5 social ads, a week of daily captions, and a "
+                f"7-day launch plan, all ready to paste. Saved to {where}. "
+                f"Post them and send me the traffic — I'll handle the orders.")
+
+    # ── SCREEN VISION — "do you see what I'm seeing" → look at Shaun's
+    #    MONITOR (not the webcam) and answer. Free Gemini vision. ──
+    def screen_look(self, question: str = "") -> str:
+        if not self.pc:
+            return "PC control is offline, sir, so I can't see the screen."
+        try:
+            shot = self.pc.screenshot_b64(max_width=1280)
+        except Exception as e:
+            return f"I couldn't capture the screen, sir: {e}"
+        if not shot:
+            return ("I couldn't capture the screen, sir — pyautogui may not "
+                    "be installed.")
+        import base64
+        try:
+            jpeg = base64.b64decode(shot[0])
+        except Exception as e:
+            return f"I grabbed the screen but couldn't read it, sir: {e}"
+
+        self.current_activity = "looking at your screen"
+        # save + show what she's looking at
+        try:
+            path = config.MEMORY_DIR / "last_screen.jpg"
+            path.write_bytes(jpeg)
+            self.show_panel("screen_vision", "WHAT I SEE ON YOUR SCREEN",
+                            str(path), kind="image", force=True)
+        except Exception:
+            pass
+
+        prompt = (question.strip() or
+                  "This is Shaun's computer screen. Tell him what you can see "
+                  "and what he appears to be looking at or working on, briefly "
+                  "and naturally, as Allison.")
+        try:
+            desc = self.llm.describe_image(jpeg, prompt)
+        except Exception as e:
+            return f"I grabbed the screen but couldn't analyse it, sir: {e}"
+        self.log_activity("screen_look", "screen")
+        return desc or "I can see the screen but words failed me, sir."
+
+    # ── REALTIME VISION SEARCH — look through the webcam, identify what
+    #    she sees, and search the web for it (Huw-Prosser-style). Works
+    #    on the FREE brain: Gemini vision + web search, no credits. ──
+    def vision_search(self, focus: str = "") -> str:
+        if not CAMERA_OK:
+            return ("My eyes are unavailable, sir — opencv-python isn't "
+                    "installed. Run the venv pip: pip install opencv-python.")
+        try:
+            jpeg = _cam_mod.capture_frame_jpeg()
+        except Exception as e:
+            return f"My eyes are unavailable, sir: {e}"
+
+        self.current_activity = "looking and searching"
+        # put what she's seeing on screen immediately (a HUD frame)
+        try:
+            path = str(config.MEMORY_DIR / "last_camera.jpg")
+            self.show_panel("vision", "VISION SEARCH — scanning…", path,
+                            kind="image", force=True)
+        except Exception:
+            pass
+
+        ask = focus.strip() or "the single main object in view"
+        prompt = (f"You are Allison looking through a webcam. Identify {ask}. "
+                  "Reply in EXACTLY this format and nothing else:\n"
+                  "OBJECT: <2-5 word name of the one main thing>\n"
+                  "SEE: <one short sentence describing what is visible>")
+        try:
+            desc = self.llm.describe_image(jpeg, prompt) or ""
+        except Exception as e:
+            return f"I captured the image but couldn't analyse it, sir: {e}"
+
+        import re as _re
+        m = _re.search(r"OBJECT:\s*(.+)", desc)
+        label = (m.group(1).strip().strip(" .\"'") if m else "")[:60]
+        sm = _re.search(r"SEE:\s*(.+)", desc)
+        see = (sm.group(1).strip() if sm else desc.strip())[:300]
+
+        info = ""
+        if label and self.web:
+            try:
+                info = self.web.search(label, max_results=3)
+            except Exception as e:
+                info = f"(couldn't search that, sir: {e})"
+
+        self.log_activity("vision_search", label or "scene")
+        panel = (f"LOOKING AT: {label or 'the scene'}\n\n{see}"
+                 + (f"\n\n— WEB SEARCH —\n{info}" if info else ""))
+        self.show_panel("vision", f"VISION — {label or 'scene'}", panel,
+                        force=True)
+
+        out = f"I'm looking at {label or 'the scene'}, sir. {see}"
+        if info:
+            out += f"\n\nHere's what I found on it:\n{info}"
+        return out
+
+    def identify_image(self, jpeg_bytes: bytes, question: str = "") -> str:
+        """Identify an image handed to me from the phone's back camera.
+        Same idea as vision_search, but the picture is provided (I don't
+        capture it myself) — so it works from anywhere, on any device."""
+        if not jpeg_bytes:
+            return "I didn't get an image, sir — try again."
+
+        self.current_activity = "identifying what you showed me"
+
+        # keep a copy + throw it on the desk HUD so the PC 'sees' it too
+        try:
+            path = str(config.MEMORY_DIR / "last_camera.jpg")
+            with open(path, "wb") as f:
+                f.write(jpeg_bytes)
+            self.show_panel("vision", "SHOWED TO ALLISON — identifying…",
+                            path, kind="image", force=True)
+        except Exception:
+            pass
+
+        q = (question or "").strip()
+        if q:
+            prompt = (
+                "You are Allison, looking at a photo the user is holding up "
+                f"to their phone camera. The user asks: \"{q}\". "
+                "Answer them directly and practically. If it's a car part, "
+                "tool, or component, name it and say what it does. Reply in "
+                "EXACTLY this format:\n"
+                "OBJECT: <2-5 word name of the main thing>\n"
+                "SEE: <2-3 sentences answering the user and describing it>")
+        else:
+            prompt = (
+                "You are Allison, looking at a photo the user is holding up "
+                "to their phone camera. Identify the main object — especially "
+                "if it's a car part, engine component, tool, or hardware, "
+                "name it precisely. Reply in EXACTLY this format:\n"
+                "OBJECT: <2-5 word name of the main thing>\n"
+                "SEE: <2-3 sentences: what it is and what it's for>")
+
+        try:
+            desc = self.llm.describe_image(jpeg_bytes, prompt) or ""
+        except Exception as e:
+            return f"I saw the picture but couldn't analyse it, sir: {e}"
+
+        import re as _re
+        m = _re.search(r"OBJECT:\s*(.+)", desc)
+        label = (m.group(1).strip().strip(" .\"'") if m else "")[:60]
+        sm = _re.search(r"SEE:\s*(.+)", desc, _re.S)
+        see = (sm.group(1).strip() if sm else desc.strip())[:600]
+
+        # if it's a part and there was no specific question, add quick web context
+        info = ""
+        if label and not q and self.web:
+            try:
+                info = self.web.search(label, max_results=3)
+            except Exception:
+                info = ""
+
+        self.log_activity("identify_image", label or "shown image")
+        panel = (f"IDENTIFIED: {label or 'the object'}\n\n{see}"
+                 + (f"\n\n— WEB —\n{info}" if info else ""))
+        self.show_panel("vision", f"IDENTIFIED — {label or 'object'}", panel,
+                        force=True)
+
+        out = (f"That's {label}, sir. {see}" if label
+               else (see or "I couldn't quite make that out, sir — try again "
+                     "with more light or a bit closer."))
+        if info:
+            out += f"\n\nQuick context:\n{info}"
+        return out
+
     # ── the mini-tab — pop information up as a movable, resizable
     #    floating panel in the UI instead of only burying it in chat ──
     def show_panel(self, panel_id: str, title: str, content: str,
-                   kind: str = "text"):
+                   kind: str = "text", force: bool = False):
         if not self.chat_callback:
             return
-        try:
-            from core import settings as _settings
-            if not _settings.get("mini_tabs", True):
-                return                    # Shaun turned pop-ups off
-        except Exception:
-            pass
+        # 'force' panels (the study progress bar) always show — Shaun
+        # asked to see study progress. Everything else obeys the setting.
+        if not force:
+            try:
+                from core import settings as _settings
+                if not _settings.get("mini_tabs", False):
+                    return                # pop-ups are off
+            except Exception:
+                pass
         import json as _json
         try:
             self.chat_callback("→ show_info:" + _json.dumps({
@@ -371,6 +710,10 @@ class JarvisBrain:
             except Exception as e:
                 print(f"Self-edit agent error: {e}")
 
+        # live study progress the UI (orb + AI Agents page) can read
+        self.study_progress = {"topic": "", "percent": 0, "stage": "",
+                               "active": False}
+
         # Researcher
         self.researcher = None
         if RESEARCH_OK:
@@ -379,7 +722,9 @@ class JarvisBrain:
                     memory_store=self.memory,
                     obsidian=self.obsidian,
                     on_progress=chat_callback,
-                    on_complete=self._on_research_complete
+                    on_complete=self._on_research_complete,
+                    on_percent=self._on_study_percent,
+                    llm=self.llm,
                 )
             except Exception as e:
                 print(f"Researcher error: {e}")
@@ -465,20 +810,82 @@ class JarvisBrain:
         except Exception as e:
             print(f"[Brain] Session save: {e}")
 
+    def _on_study_percent(self, topic: str, percent: int, stage: str):
+        """Live study progress → a visible progress-bar panel Shaun can
+        watch, the orb's WORKING state, and shared state for the Agents
+        page. This is the 'I can see her studying' bar."""
+        self.study_progress = {"topic": topic, "percent": int(percent),
+                               "stage": stage, "active": percent < 100}
+        # draw a text progress bar in a pinned mini-tab that updates in place
+        filled = int(round(percent / 5))          # 20 cells = 100%
+        bar = "█" * filled + "░" * (20 - filled)
+        body = (f"STUDYING: {topic}\n\n"
+                f"[{bar}] {percent}%\n\n"
+                f"{stage.capitalize()}")
+        self.show_panel("study", f"STUDYING — {topic[:24]}", body, force=True)
+        # drive the orb + activity ledger so the whole app shows she's
+        # working — the dashboard turns current_activity into the orb's
+        # WORKING state automatically.
+        if percent >= 100:
+            self.current_activity = "idle"
+            # done — auto-close the study bar so it doesn't sit over the
+            # chat. The finished report still lands in the conversation,
+            # and progress stays on the AI Agents page.
+            if self.chat_callback:
+                try:
+                    self.chat_callback("→ close_info:study")
+                except Exception:
+                    pass
+        else:
+            self.current_activity = f"studying {topic} — {percent}%"
+
     def _on_research_complete(self, result: str):
+        self.study_progress = {"topic": self.study_progress.get("topic", ""),
+                               "percent": 100, "stage": "done", "active": False}
         self._save_session()
         if self.chat_callback:
-            self.chat_callback(f"JARVIS: {result}")
+            self.chat_callback(f"ALLISON: {result}")
         if self.voice_callback:
-            self.voice_callback("Research complete, sir. Knowledge saved permanently.")
+            self.voice_callback("All done, sir. I've saved everything to memory.")
 
 
-    def process(self, raw_text: str, files=None) -> str:
+    def _process_entry(self, raw_text: str, files=None) -> str:
+        """The original entry point, now wrapped by process() below so
+        every turn lands on the shared transcript first."""
         try:
             self.current_activity = f"processing: {raw_text.strip()[:50]}"
             return self._process_inner(raw_text, files)
         finally:
             self.current_activity = "idle"
+
+    def say_to_session(self, role, text, source="pc", kind="text"):
+        """Put a message on the shared transcript. Safe to call from any
+        thread and from either device."""
+        try:
+            if self.session:
+                return self.session.append(role, text, source=source,
+                                           kind=kind)
+        except Exception as e:
+            print(f"[Brain] session append failed: {e}")
+        return None
+
+    def process(self, raw_text: str, files=None, source="pc") -> str:
+        """Public entry point. `source` records WHICH window asked, so
+        the other one can show it arriving."""
+        self.say_to_session("user", raw_text, source=source)
+        try:
+            if self.session:
+                self.session.set_status("working", raw_text.strip()[:60])
+        except Exception:
+            pass
+        reply = self._process_entry(raw_text, files)
+        self.say_to_session("allison", reply, source=source)
+        try:
+            if self.session:
+                self.session.set_status("standing_by", "")
+        except Exception:
+            pass
+        return reply
 
     def _process_inner(self, raw_text: str, files=None) -> str:
         text = raw_text.strip()
@@ -489,6 +896,38 @@ class JarvisBrain:
         if not text:
             return "I did not catch that, sir."
         lower = text.lower()
+
+        # ── CONFIRMATION GATE ────────────────────────────────────────
+        # A destructive tool parked itself awaiting a yes. Resolve that
+        # here, deterministically — never leave it to the model to decide
+        # whether Shaun agreed, and never let a stale token linger.
+        if self._pending_confirms:
+            if re.fullmatch(r"\s*(y|ye|yes|yep|yeah|ok|okay|do it|go|go "
+                            r"ahead|confirm|proceed|please do|sure)\s*[.!]*",
+                            lower):
+                token, call = next(iter(self._pending_confirms.items()))
+                self._pending_confirms.clear()
+                args = dict(call["args"])
+                args["confirm"] = token
+                self._last_tool_results = []
+                out = _coerce(call["tool"],
+                                 self._execute_tool(call["tool"], args))
+                self._last_tool_results.append(out)
+                self.log_activity(call["tool"], "confirmed by Shaun",
+                                  status="ok" if out.ok else "fail")
+                if out.ok:
+                    return (f"Confirmed and done, sir.\n\n{out.summary}"
+                            + (f"\n\n{out.stdout.strip()[:1200]}"
+                               if out.stdout.strip() else ""))
+                return (f"You said go, but it FAILED, sir — nothing to "
+                        f"celebrate:\n{out.error or out.summary}")
+            if re.fullmatch(r"\s*(n|no|nope|cancel|stop|don'?t|abort|"
+                            r"never mind|nevermind)\s*[.!]*", lower):
+                n = len(self._pending_confirms)
+                self._pending_confirms.clear()
+                return (f"Cancelled, sir — {n} pending action "
+                        f"{'was' if n == 1 else 'were'} discarded. Nothing "
+                        f"was changed.")
 
         # ── TIME & DATE ─────────────────────────
         if any(x in lower for x in ["what time","whats the time","what's the time"]):
@@ -525,6 +964,56 @@ class JarvisBrain:
                       "starter pack", "store starter"):
                 brief = re.sub(p, "", brief, flags=re.IGNORECASE)
             return self.build_store_plan(brief.strip())
+
+        # ── MARKETING PACK — Allison writes ads/captions/plan (ANY
+        #    brain, no vision/credits; pure writing) ──
+        if any(x in lower for x in [
+                "marketing pack", "write ads", "write me ads", "make ads",
+                "make adds", "make me ads", "write adverts", "make adverts",
+                "social ads", "write captions", "marketing plan",
+                "market my store", "market the store", "do marketing",
+                "advertise my store", "advertise the store", "write posts"]):
+            brief = text
+            for p in ("marketing pack", "write me ads", "write ads", "make me ads",
+                      "make ads", "make adds", "write adverts", "make adverts",
+                      "social ads", "write captions", "marketing plan",
+                      "do marketing", "write posts"):
+                brief = re.sub(p, "", brief, flags=re.IGNORECASE)
+            return self.build_marketing(brief.strip())
+
+        # ── FULL-SCREEN "JARVIS" FOCUS MODE ──
+        if any(x in lower for x in [
+                "focus mode", "full screen mode", "fullscreen mode",
+                "jarvis mode", "take over the screen", "focus view",
+                "clean mode", "go full screen", "full takeover"]):
+            off = any(x in lower for x in ["off", "exit", "leave", "normal",
+                                           "dashboard", "stop"])
+            if self.chat_callback:
+                self.chat_callback(f"→ focus_mode:{'off' if off else 'on'}")
+            return ("Back to the dashboard, sir." if off else
+                    "Focus mode, sir — full screen, just me and the task.")
+
+        # ── MINI-TAB POP-UPS on/off (the annoyance switch) ──
+        if any(x in lower for x in [
+                "turn off pop", "turn off the pop", "stop popping",
+                "disable pop", "turn off mini tab", "disable mini tab",
+                "stop the mini tab", "no more pop", "turn off panels"]):
+            try:
+                from core import settings as _settings
+                _settings.set("mini_tabs", False)
+                return ("Done — pop-up panels are off, sir. I'll keep answers "
+                        "in the chat (the study progress bar still shows).")
+            except Exception as e:
+                return f"Couldn't change that setting, sir: {e}"
+        if any(x in lower for x in [
+                "turn on pop", "enable pop", "turn on mini tab",
+                "enable mini tab", "turn on panels", "show pop up"]):
+            try:
+                from core import settings as _settings
+                _settings.set("mini_tabs", True)
+                return "Pop-up panels are back on, sir."
+            except Exception as e:
+                return f"Couldn't change that setting, sir: {e}"
 
         # ── SYSTEM STATUS (explicit phrases only) ─
         if any(x in lower for x in ["system status","system report","system info",
@@ -633,6 +1122,31 @@ class JarvisBrain:
             if any(x in lower for x in ["edit status", "self edit status", "pending edit"]):
                 return self.self_edit.status()
 
+        # ── VS CODE — DETERMINISTIC (don't rely on a flaky free brain to
+        #    tool-call it). "open the jarvis folder in vs code", "go into
+        #    vs code", "open my code" etc. all run for real, right here. ──
+        if self.pc and not compound \
+                and any(v in lower for v in ["open", "go into", "load",
+                                             "launch", "go to"]) \
+                and any(x in lower for x in ["vs code", "vscode", "vs-code",
+                                             "visual studio code", "in code"]):
+            path = None
+            if any(w in lower for w in ["jarvis", "your code", "my code",
+                                        "the code", "your source",
+                                        "yourself", "your folder"]):
+                path = str(config.ROOT_DIR)          # C:\jarvis
+            else:
+                m = re.search(r"([a-zA-Z]:\\[^\"']+|/[^\s\"']+)", text)
+                if m:
+                    path = m.group(1).strip()
+            self._request_mini()
+            res = self.pc.open_vscode(path)
+            # if the 'code' command isn't on PATH, at least open the folder
+            if path and "isn't on PATH" in str(res):
+                self.pc.open_anything(path)
+                res += " (I've opened the folder in Explorer instead.)"
+            return res
+
         # ── APPS / OPEN ANYTHING (simple cases only) ──
         # Bare "open X" is handled instantly ONLY when X looks like a
         # single target ("open chrome", "open downloads"). Anything
@@ -737,8 +1251,34 @@ class JarvisBrain:
                     topic = text[len(trigger):].strip().strip("\"'")
                     if topic:
                         if self.researcher.active:
-                            return "I am already researching a topic, sir. Please wait."
+                            return ("I'm still studying "
+                                    f"'{self.study_progress.get('topic','a topic')}' "
+                                    f"— {self.study_progress.get('percent',0)}% "
+                                    "done, sir. One at a time.")
                         return self.researcher.study_async(topic, depth=12)
+
+        # ── STUDY when the research engine FAILED to load — tell the
+        #    truth, never let a free brain fabricate a fake study. ──
+        elif any(lower.startswith(t) for t in
+                 ["study ", "research ", "learn everything about ",
+                  "learn about ", "investigate ", "deep dive into "]):
+            return ("I can't study that right now, sir — my research engine "
+                    "didn't load this session (check the console for a "
+                    "'Researcher error'). I won't pretend to study something I "
+                    "can't. Restart me and try again, and if it keeps failing "
+                    "tell me and I'll fix the engine.")
+
+        # ── study progress check ──
+        if any(x in lower for x in ["study progress", "how's the study",
+                                    "hows the study", "are you done studying",
+                                    "study status", "how far are you"]):
+            sp = self.study_progress
+            if sp.get("active"):
+                return (f"Studying '{sp['topic']}' — {sp['percent']}% done "
+                        f"({sp['stage']}), sir.")
+            if sp.get("topic"):
+                return f"Finished studying '{sp['topic']}', sir. Ask me about it."
+            return "I'm not studying anything right now, sir."
 
         # ── TASKS ───────────────────────────────
         if self.tasks:
@@ -799,6 +1339,38 @@ class JarvisBrain:
             result = self.activity_report()
             self.show_panel("activity", "ACTIVITY LOG", result)
             return result
+
+        # ── SCREEN VISION — "do you see what I'm seeing" → her look at
+        #    Shaun's MONITOR (distinct from the webcam) ──
+        if any(x in lower for x in [
+                "do you see what i", "see what i am seeing", "see what im seeing",
+                "see what i'm seeing", "look at my screen", "on my screen",
+                "can you see my screen", "see my screen", "read my screen",
+                "what's on my screen", "whats on my screen", "look at the screen"]):
+            q = text
+            for p in ["do you see what i am seeing", "do you see what im seeing",
+                      "do you see what i'm seeing", "do you see what i",
+                      "look at my screen", "can you see my screen",
+                      "read my screen", "look at the screen", "see my screen"]:
+                q = re.sub(p, "", q, flags=re.IGNORECASE)
+            return self.screen_look(q.strip())
+
+        # ── REALTIME VISION SEARCH — identify + look up what she sees ──
+        if CAMERA_OK and any(x in lower for x in [
+                "what am i looking at", "what is this", "what's this",
+                "whats this", "identify this", "scan this", "vision search",
+                "look and search", "what am i holding", "search what you see",
+                "what am i holding up", "identify what you see",
+                "what i am holding", "what im holding", "what i'm holding",
+                "what do i have in my hand", "look at what i", "look what i"]):
+            focus = lower
+            for p in ["what am i looking at", "identify what you see",
+                      "identify this", "scan this", "vision search",
+                      "look and search", "search what you see",
+                      "what am i holding up", "what am i holding",
+                      "what's this", "whats this", "what is this"]:
+                focus = focus.replace(p, "")
+            return self.vision_search(focus.strip())
 
         # ── CAMERA / EYES ───────────────────────
         if CAMERA_OK and any(x in lower for x in [
@@ -872,6 +1444,209 @@ class JarvisBrain:
     #  TOOL-USE BRAIN
     # ────────────────────────────────────────────
 
+    # ── SALVAGING A TOOL CALL THAT ARRIVED AS TEXT ───────────────────
+    # A small model that cannot manage the structured tool-call format
+    # sometimes types it out instead:
+    #     <function=website_build>{"name": "...", ...}</function>
+    # Shaun saw exactly that: a wall of JSON where his website should
+    # have been. Nothing ran, and the honesty gate let it through
+    # because its regex looks for English claims, not for syntax.
+    #
+    # The old response was to STRIP it, which is honest but useless —
+    # his request evaporates. Better: the model told us precisely which
+    # tool it wanted and with what arguments. Parse it, check the tool
+    # is real, and RUN it. A malformed envelope around a correct
+    # intention is worth rescuing; it is still a real execution with a
+    # real result, and it gets logged as a salvage so the underlying
+    # weakness stays visible.
+    _TEXT_CALL = re.compile(
+        r"[<(]\s*function(?:_call)?\s*[=:]\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)"
+        r"[\"']?\s*>?\s*(\{.*?\})\s*(?:<\s*/\s*function(?:_call)?\s*>|$)",
+        re.S)
+
+    def _salvage_text_tool_call(self, reply, execute):
+        """Find a tool call typed as prose and actually run it.
+
+        Returns (ran, tool_name, result) — ran is False if there was
+        nothing to salvage or the tool was not real.
+        """
+        if not reply or "function" not in reply.lower():
+            return False, None, None
+        m = self._TEXT_CALL.search(reply)
+        raw_args = None
+        name = None
+        if m:
+            name, raw_args = m.group(1), m.group(2)
+        else:
+            # bare {"name": ..., "parameters"/"arguments": {...}}
+            m2 = re.search(r'\{[^{}]*"name"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"'
+                           r'.*?\}', reply, re.S)
+            if not m2:
+                return False, None, None
+            try:
+                blob = json.loads(self._first_json_object(reply) or "{}")
+            except Exception:
+                return False, None, None
+            name = blob.get("name")
+            raw_args = json.dumps(blob.get("parameters")
+                                  or blob.get("arguments") or {})
+        if not name:
+            return False, None, None
+        valid = {t["name"] for t in self._tool_definitions()}
+        if name not in valid:
+            return False, name, None
+        try:
+            args = json.loads(raw_args) if raw_args else {}
+            if not isinstance(args, dict):
+                args = {}
+        except Exception:
+            # the JSON itself was mangled — do not guess at his intent
+            return False, name, None
+        args.pop("name", None) if name in ("website_build",) and \
+            not isinstance(args.get("name"), str) else None
+        self.log_activity("salvaged_tool_call",
+                          f"{name} was typed as text; executed it for real",
+                          status="ok")
+        if self.chat_callback:
+            self.chat_callback(f"→ {name} (recovered from a mis-formatted "
+                               f"call)")
+        try:
+            out = execute(name, args)
+            return True, name, out
+        except Exception as e:
+            return True, name, _coerce(name, f"FAILED: {e}")
+
+    @staticmethod
+    def _first_json_object(text):
+        depth, start = 0, -1
+        for i, ch in enumerate(text):
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    return text[start:i + 1]
+        return None
+
+    def _diagnose_brain_failure(self, err: str) -> str:
+        """Explain WHY each brain failed — per provider, not across them.
+
+        THE BUG THIS FIXES: the old version searched the whole combined
+        error string for "gemini" and "400" together. Gemini had
+        returned 429 (quota) and ANTHROPIC had returned 400 (no
+        credit) — two different providers, one blob of text — so it
+        confidently told Shaun his Gemini key was invalid and sent him
+        to regenerate a key that was working fine. A wrong diagnosis
+        stapled to a real error is the exact failure this rebuild
+        exists to stamp out, and it had crept into my own error handler.
+
+        Each provider's message is now diagnosed on its own.
+        """
+        parts = [p.strip() for p in (err or "").split(" | ") if p.strip()]
+        lines = ["All my brains failed on that one, sir. Here's each one, "
+                 "honestly:"]
+        advice, waits = [], []
+
+        for part in parts:
+            name, _, msg = part.partition(":")
+            name = name.strip().lower()
+            low = msg.lower()
+
+            if "429" in msg or "rate limit" in low or "quota" in low:
+                wait = self._retry_seconds(msg)
+                if wait:
+                    waits.append(wait)
+                if "quota" in low and "day" in low:
+                    reason = "daily free quota used up — resets tomorrow"
+                elif "quota" in low:
+                    reason = "free quota exhausted"
+                else:
+                    reason = "rate limited (too many requests just now)"
+                lines.append(f"  • {name}: {reason}"
+                             + (f", retry in ~{wait}s" if wait else ""))
+            elif "credit balance" in low or "billing" in low:
+                lines.append(f"  • {name}: out of credit — this one is paid")
+                advice.append("Claude is the only one here that needs money, "
+                              "and it's the sharpest. A few dollars at "
+                              "console.anthropic.com/settings/billing would "
+                              "make her markedly better AND stop the free "
+                              "ones being the bottleneck.")
+            elif "no api key" in low or "not set" in low:
+                envs = {"groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY",
+                        "openrouter": "OPENROUTER_API_KEY",
+                        "anthropic": "ANTHROPIC_API_KEY"}
+                lines.append(f"  • {name}: no key configured")
+                if name in envs:
+                    advice.append(f"Set {envs[name]} in C:\\jarvis\\keys.py "
+                                  f"to bring {name} online.")
+            elif "401" in msg or "403" in msg or "api key not valid" in low \
+                    or "invalid auth" in low:
+                lines.append(f"  • {name}: key REJECTED — wrong or revoked")
+                if name == "gemini":
+                    advice.append("Get a fresh Gemini key at "
+                                  "aistudio.google.com/apikey (it starts with "
+                                  "AIza) and update C:\\jarvis\\keys.py.")
+            elif "no longer available" in low or "404" in msg:
+                lines.append(f"  • {name}: the model name is retired")
+                advice.append("Type 'test brains' — I'll list the models this "
+                              "key can actually use and switch to one.")
+            elif "unreachable" in low or "timeout" in low:
+                lines.append(f"  • {name}: could not be reached (network)")
+            else:
+                lines.append(f"  • {name}: {msg.strip()[:110]}")
+
+        if waits:
+            lines.append("")
+            lines.append(f"Soonest anything frees up: about "
+                         f"{min(waits)} second(s). Ask me again then and it "
+                         f"should go through.")
+        elif any("quota" in p.lower() or "429" in p for p in parts):
+            lines.append("")
+            lines.append("Every free brain is throttled right now. They "
+                         "recover on their own — minutes for rate limits, "
+                         "tomorrow for a daily cap.")
+        for a in dict.fromkeys(advice):
+            lines.append(f"  → {a}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _retry_seconds(msg: str):
+        """Pull a real retry delay out of the provider's own reply.
+
+        Gemini puts retryDelay in the error details; groq says
+        "try again in 7.5s". Reporting the number they gave beats
+        guessing "a minute".
+        """
+        for pat in (r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"',
+                    r"try again in (\d+(?:\.\d+)?)\s*s",
+                    r"retry[- ]after[\"'\s:]+(\d+(?:\.\d+)?)"):
+            m = re.search(pat, msg, re.I)
+            if m:
+                try:
+                    return int(float(m.group(1))) + 1
+                except Exception:
+                    pass
+        return None
+
+    def _owner_briefing(self) -> str:
+        """Everything true I know about Shaun, for tools that write for
+        him. Prefers the structured profile; falls back to plain facts."""
+        try:
+            fn = getattr(self.memory, "about_owner", None)
+            if callable(fn):
+                out = fn()
+                if out.strip():
+                    return out
+        except Exception:
+            pass
+        try:
+            facts = self.memory.get_all() or []
+            return "\n".join(f"- {f}" for f in facts[:18])
+        except Exception:
+            return ""
+
     def _tool_definitions(self):
         return [
             {"name": "computer_use",
@@ -913,9 +1688,23 @@ class JarvisBrain:
              "input_schema": {"type": "object", "properties": {
                  "command": {"type": "string"}}, "required": ["command"]}},
             {"name": "type_text",
-             "description": "Type text into whatever window currently has focus.",
+             "description": "Type text into whatever window currently has focus. This is real keyboard typing on Shaun's PC.",
              "input_schema": {"type": "object", "properties": {
                  "text": {"type": "string"}}, "required": ["text"]}},
+            {"name": "mouse_control",
+             "description": "Move and click Shaun's REAL mouse cursor — you physically control it. action: 'move' (glide to x,y), 'click'/'double_click'/'right_click' (at x,y, or where it is if x,y omitted), 'scroll' (amount: +up/-down, optional x,y), 'drag' (from x,y to x2,y2). Coordinates are screen pixels from the top-left. Take a screenshot first if you need to know where things are; on the free brain (no vision) use this for known positions, scrolling and dragging.",
+             "input_schema": {"type": "object", "properties": {
+                 "action": {"type": "string", "enum": ["move", "click", "double_click", "right_click", "scroll", "drag"]},
+                 "x": {"type": "integer"}, "y": {"type": "integer"},
+                 "x2": {"type": "integer"}, "y2": {"type": "integer"},
+                 "amount": {"type": "integer", "description": "scroll amount, positive=up negative=down"}},
+                 "required": ["action"]}},
+            {"name": "press_keys",
+             "description": "Press a key or keyboard shortcut on Shaun's REAL keyboard, e.g. ['enter'], ['ctrl','s'], ['alt','tab'], ['win','d']. Use lowercase key names.",
+             "input_schema": {"type": "object", "properties": {
+                 "keys": {"type": "array", "items": {"type": "string"},
+                          "description": "Keys to press together, e.g. ['ctrl','shift','esc']"}},
+                 "required": ["keys"]}},
             {"name": "pc_power",
              "description": "Power actions on the PC.",
              "input_schema": {"type": "object", "properties": {
@@ -1023,6 +1812,18 @@ class JarvisBrain:
                  "question": {"type": "string",
                               "description": "Optional specific question about the scene"}},
                  "required": []}},
+            {"name": "screen_look",
+             "description": "Look at Shaun's COMPUTER SCREEN (a screenshot of his monitor, NOT the webcam) and tell him what's on it / what he's working on. Use when he says 'do you see what I'm seeing', 'look at my screen', 'what's on my screen', 'read my screen'. Free Gemini vision.",
+             "input_schema": {"type": "object", "properties": {
+                 "question": {"type": "string",
+                              "description": "Optional specific question about the screen"}},
+                 "required": []}},
+            {"name": "vision_search",
+             "description": "Look through the webcam, IDENTIFY the main thing you see, and SEARCH the web for it — then report what it is. Use when Shaun holds something up or asks 'what am I looking at', 'what is this', 'identify this', 'scan this', 'search what you see'. Shows the live frame on screen. Works on the free brain.",
+             "input_schema": {"type": "object", "properties": {
+                 "focus": {"type": "string",
+                           "description": "Optional: what to focus on, e.g. 'the label', 'the product I'm holding'"}},
+                 "required": []}},
             {"name": "agents_status",
              "description": "Status report of all background agents (Shopify, Trading, Mind).",
              "input_schema": {"type": "object", "properties": {}}},
@@ -1032,6 +1833,12 @@ class JarvisBrain:
                  "agent": {"type": "string"},
                  "action": {"type": "string", "enum": ["start", "stop"]}},
                  "required": ["agent", "action"]}},
+            {"name": "marketing_pack",
+             "description": "Write Shaun a ready-to-post MARKETING pack for his store: social ads, a week of daily captions, and a 7-day launch plan — all in his voice, priced for South Africa, ready to paste. Use whenever he asks you to write ads/adverts, captions, posts, or do marketing for the store. Pure writing, works on any brain.",
+             "input_schema": {"type": "object", "properties": {
+                 "brief": {"type": "string",
+                           "description": "What to market / any angle, offer or product focus Shaun mentioned. Optional — leave blank to market his live store."}},
+                 "required": []}},
             {"name": "shopify_report",
              "description": "Shopify store report. Use kind='full' whenever Shaun asks how Shopify/the store/business is doing — it covers sales today & yesterday, fulfilment backlog, customer emails waiting, stock, and every autopilot action of the last 24h. The other kinds are for narrow follow-ups.",
              "input_schema": {"type": "object", "properties": {
@@ -1061,6 +1868,17 @@ class JarvisBrain:
                  "name": {"type": "string", "description": "Site/folder name, filename-safe e.g. 'coffee_shop'"},
                  "html": {"type": "string", "description": "The COMPLETE HTML document including <!DOCTYPE html>, inline <style> and <script>. Make it genuinely good."}},
                  "required": ["name", "html"]}},
+            {"name": "code_project",
+             "description": "Build a REAL multi-file coding project — a website (multiple HTML/CSS/JS files), a script, or a small program — by writing every file to a project folder on Shaun's PC and opening it in VS Code. Use whenever he asks you to CODE, build an app/website/script/program/tool, or make something with more than one file. Write real, working, complete code in each file — never placeholders or 'TODO'. Provide every file the project needs to run.",
+             "input_schema": {"type": "object", "properties": {
+                 "name": {"type": "string", "description": "Project folder name, filename-safe e.g. 'todo_app'"},
+                 "files": {"type": "array", "description": "Every file in the project.",
+                     "items": {"type": "object", "properties": {
+                         "path": {"type": "string", "description": "Relative path inside the project, e.g. 'index.html' or 'src/app.py'"},
+                         "content": {"type": "string", "description": "The COMPLETE contents of this file."}},
+                         "required": ["path", "content"]}},
+                 "open_html": {"type": "string", "description": "Optional: relative path of an HTML file to also open in the browser, e.g. 'index.html'"}},
+                 "required": ["name", "files"]}},
             {"name": "cost_report",
              "description": "Real Anthropic API spend report — session, today, this month, and all time — from actual token usage, never estimated. Use when Shaun asks what he's spending or what something is costing.",
              "input_schema": {"type": "object", "properties": {}}},
@@ -1107,6 +1925,65 @@ class JarvisBrain:
                  "amount_zar": {"type": "number"},
                  "units": {"type": "number"}},
                  "required": ["action", "pair"]}},
+
+            # ── rebuilt tools: real execution, verified results ──
+            {"name": "shopify_orders",
+             "description": "REAL Shopify Admin API call: orders for the last N days with gross revenue. Returns real HTTP status and real order data.",
+             "input_schema": {"type": "object", "properties": {
+                 "days": {"type": "integer", "description": "1-365, default 7"},
+                 "status": {"type": "string", "enum": ["any", "open", "closed", "cancelled"]}}}},
+            {"name": "shopify_products",
+             "description": "REAL Shopify Admin API call: full paginated product/variant list with low-stock detection. Reports if the catalogue was truncated.",
+             "input_schema": {"type": "object", "properties": {
+                 "low_stock_below": {"type": "integer", "description": "flag variants at or below this qty, default 5"}}}},
+            {"name": "shopify_traffic",
+             "description": "REAL Shopify analytics (ShopifyQL) call: store sessions for the last N days. Needs the read_analytics scope; fails loudly if missing.",
+             "input_schema": {"type": "object", "properties": {
+                 "days": {"type": "integer", "description": "1-90, default 7"}}}},
+            {"name": "shopify_update_price",
+             "description": "WRITES to the live Shopify store: change a variant price. Always asks for confirmation first and does nothing until confirmed.",
+             "input_schema": {"type": "object", "properties": {
+                 "variant_id": {"type": "string"},
+                 "price": {"type": "string"},
+                 "confirm": {"type": "string", "description": "confirmation token; omit on the first call"}},
+                 "required": ["variant_id", "price"]}},
+            {"name": "website_build",
+             "description": "Build a REAL static website on disk. Every file is written, re-read and hash-verified; the result reports byte counts and SHA-256. Asks before overwriting existing files.",
+             "input_schema": {"type": "object", "properties": {
+                 "name": {"type": "string", "description": "folder/site name"},
+                 "title": {"type": "string"},
+                 "tagline": {"type": "string"},
+                 "intro": {"type": "string"},
+                 "sections": {"type": "array", "description": "cards", "items": {
+                     "type": "object", "properties": {
+                         "heading": {"type": "string"},
+                         "body": {"type": "string"}}}},
+                 "cta": {"type": "string"},
+                 "details": {"type": "string", "description": "Shaun's ANSWERS to the questions you asked him. Pass them here verbatim on the second call."},
+                 "skip_questions": {"type": "boolean", "description": "true only if he said 'just build it'"},
+                 "with_photos": {"type": "boolean", "description": "include real openly-licensed photos, default true"},
+                 "photo_topic": {"type": "string", "description": "what the photos should show, e.g. 'turbocharger engine'"},
+                 "deep": {"type": "boolean", "description": "refine each section in its own extra call. Slower and uses ~6x the API calls — only if Shaun asks for more depth and the brains are not rate-limited."},
+                 "confirm": {"type": "string", "description": "confirmation token; omit on the first call"}},
+                 "required": ["name"]}},
+            {"name": "code_write",
+             "description": "Write a REAL multi-file code project, then RUN it and fix it from the actual error until it works. Reports real stdout and exit code. Use this for any coding request.",
+             "input_schema": {"type": "object", "properties": {
+                 "name": {"type": "string", "description": "project folder name"},
+                 "brief": {"type": "string", "description": "what to build, in detail"},
+                 "run": {"type": "boolean", "description": "run it to prove it works, default true"},
+                 "confirm": {"type": "string", "description": "confirmation token; omit on the first call"}},
+                 "required": ["name", "brief"]}},
+            {"name": "code_run",
+             "description": "Run an existing project and report the real stdout, stderr and exit code.",
+             "input_schema": {"type": "object", "properties": {
+                 "name": {"type": "string"},
+                 "entry": {"type": "string"},
+                 "confirm": {"type": "string"}},
+                 "required": ["name"]}},
+            {"name": "website_list",
+             "description": "List the websites actually present on disk, read from the filesystem.",
+             "input_schema": {"type": "object", "properties": {}}},
         ]
 
     # tools kept when a free brain (tight token budget) is answering.
@@ -1119,33 +1996,156 @@ class JarvisBrain:
                    "pc_power", "set_volume", "take_screenshot", "web_search",
                    "get_weather", "remember_fact", "add_task", "list_tasks",
                    "trading_portfolio", "activity_report", "cost_report",
-                   "build_store_plan",
+                   "build_store_plan", "marketing_pack",
+                   # real hands — mouse + keyboard work blind (no vision),
+                   # so the free brain can drive them too
+                   "type_text", "mouse_control", "press_keys",
+                   # coding + web design — pure writing (no vision needed),
+                   # so the free brain can build sites/scripts/projects and
+                   # read/write files too
+                   "build_website", "code_project", "write_file",
+                   "read_file", "list_directory",
+                   # realtime vision search + screen vision — Gemini vision
+                   # is free, so the free brain can see the camera AND screen
+                   "vision_search", "screen_look",
+                   # image generation is FREE on Gemini — she CAN draw
+                   "draw_image",
                    # pure-API store tools — no vision needed, so the free
                    # brains can run them too (report on the store, manage
                    # customer replies) even with Claude out of credits
-                   "shopify_report", "shopify_replies"}
+                   "shopify_report", "shopify_replies",
+                   # rebuilt tools — real execution, safe on any brain
+                   "shopify_orders", "shopify_products", "shopify_traffic",
+                   "website_build", "website_list",
+                   "code_write", "code_run"}
+
+    # Language that asserts a real-world action happened. Used ONLY as
+    # the trigger for the zero-tools case in the honesty gate — where we
+    # already know from the ledger that nothing ran, so any match is
+    # fiction. It is a wide net on purpose: a false positive costs one
+    # over-cautious sentence, a false negative ships a lie to Shaun.
+    _ACTION_CLAIM = (
+        r"\b(?:i(?:'ve| have| ?am|'m)?\s+)?"
+        r"(?:navigat|click|fill|enter|typ|creat|sign|logg|log|submit|"
+        r"open|install|deploy|updat|delet|remov|sent|send|email|upload|"
+        r"download|sav|writ|wrote|built|build|made|generat|fetch|"
+        r"schedul|book|order|purchas|refund|fulfil|cancel)"
+        r"(?:ed|ing|s)?\b"
+        r"|\bhas been (?:created|set up|submitted|completed|sent|saved|"
+        r"updated|deleted|deployed|built)\b"
+        r"|\b(?:is|are) (?:now )?(?:live|done|ready|complete|set up)\b"
+        r"|\bi set up your\b|\bdone,? sir\b|\ball set\b")
 
     # tasks that genuinely NEED the main Claude brain (vision + real
     # browser/screen control). If a fallback brain is answering one of
     # these, be honest instead of improvising.
+    # WHAT GENUINELY NEEDS CLAUDE — vision-guided screen control and
+    # driving a real browser. Nothing else.
+    #
+    # This list used to include shopify, store, website, dashboard and
+    # admin. All of those now have REAL working tools on the free brains
+    # (shopify_orders/products/traffic hit the live Admin API;
+    # website_build writes and hash-verifies real files), so matching
+    # them made the guard fire on work she had just successfully done
+    # and reply "I can't do that, top up your credits". A guard that
+    # denies completed work is worse than no guard: it destroys trust in
+    # the honest messages too.
     _NEEDS_CLAUDE = re.compile(
-        r"\b(shopify|store|browser|website|log ?in|sign ?in|sign ?up|"
-        r"screen|click|navigate|fill in|checkout|dashboard|admin|"
-        r"add product|set ?up (my|the|a) |create (an? )?account)\b",
+        r"\b(log ?in|sign ?in|sign ?up|checkout|"
+        r"click (on|the)|navigate to|fill in the|"
+        r"drive the browser|control (the )?screen|"
+        r"create (an? )?account)\b",
         re.IGNORECASE)
+
+    # For a weak brain, the ESSENTIAL arguments only. website_build grew
+    # to fourteen parameters while I was adding features, and an 8B model
+    # (which is where groq lands once the 70B is rate-limited) cannot
+    # emit that as a structured call — so it typed the whole thing out as
+    # prose instead and nothing ran. Optional refinements are for the
+    # models that can handle them; everything here has a sane default.
+    _ESSENTIAL_ARGS = {
+        "website_build": ["name", "brief", "details", "skip_questions"],
+        "code_write":    ["name", "brief", "confirm"],
+        "code_run":      ["name", "confirm"],
+        "shopify_orders": ["days"],
+        "shopify_products": [],
+        "shopify_traffic": ["days"],
+        "draw_image":    ["prompt", "name"],
+        "code_project":  ["name", "files"],
+        "write_file":    ["path", "content"],
+        "read_file":     ["path"],
+        "web_search":    ["query"],
+    }
 
     def _compact_tools(self):
         slim = []
         for t in self._tool_definitions():
-            if t["name"] in self._CORE_TOOLS:
-                slim.append({"name": t["name"],
-                             "description": t["description"][:80],
-                             "input_schema": t["input_schema"]})
+            if t["name"] not in self._CORE_TOOLS:
+                continue
+            schema = t["input_schema"]
+            keep = self._ESSENTIAL_ARGS.get(t["name"])
+            if keep is not None and isinstance(schema, dict) \
+                    and schema.get("properties"):
+                props = {k: v for k, v in schema["properties"].items()
+                         if k in keep}
+                schema = {"type": "object", "properties": props}
+                req = [r for r in (t["input_schema"].get("required") or [])
+                       if r in props]
+                if req:
+                    schema["required"] = req
+            slim.append({"name": t["name"],
+                         "description": t["description"][:110],
+                         "input_schema": schema})
         return slim
 
     def _execute_tool(self, name, args):
         try:
             pc = self.pc
+
+            # ── rebuilt tools ────────────────────────────────────────
+            # These return a ToolResult themselves, so they pass through
+            # coerce() untouched and carry their own asserted verdict:
+            # real HTTP status codes, real byte counts, real hashes.
+            if name in ("shopify_orders", "shopify_products",
+                        "shopify_traffic", "shopify_update_price"):
+                from tools import shopify_tool as _shop
+                return getattr(_shop, name)(
+                    **{k: v for k, v in (args or {}).items() if v is not None})
+            if name in ("code_write", "code_run"):
+                from tools import code_tool as _code
+
+                def _think(system, user):
+                    return self.llm.simple(system, user, max_tokens=2000)
+
+                kw = {k: v for k, v in (args or {}).items() if v is not None}
+                if name == "code_write":
+                    kw.setdefault("think", _think)
+                    kw.setdefault("progress", self.chat_callback)
+                    kw.setdefault("about", self._owner_briefing())
+                return getattr(_code, name)(**kw)
+
+            if name in ("website_build", "website_list"):
+                from tools import website_tool as _web
+                kw = {k: v for k, v in (args or {}).items() if v is not None}
+                if name == "website_build":
+                    # Hand the tool a brain and a voice so it can run the
+                    # THOROUGH path: plan the site, then write each
+                    # section in its own pass, narrating as it goes.
+                    # Without these it silently degrades to the old
+                    # one-second single-pass build.
+                    def _think(system, user):
+                        return self.llm.simple(system, user, max_tokens=500)
+                    kw.setdefault("think", _think)
+                    kw.setdefault("progress", self.chat_callback)
+                    kw.setdefault("brief", kw.get("intro")
+                                  or kw.get("title") or kw.get("name", ""))
+                    # WHO THE SITE IS FOR. Without this the planner knew
+                    # nothing about Shaun and fell back to stock phrases
+                    # like "high-performance vehicles" — generic copy on
+                    # a real business site costs him real customers.
+                    kw.setdefault("about", self._owner_briefing())
+                return getattr(_web, name)(**kw)
+
             if name == "computer_use":
                 if not self.hands:
                     return ("Hands offline, sir — needs pyautogui and the "
@@ -1163,6 +2163,29 @@ class JarvisBrain:
                 return pc.run_command(args["command"]) if pc else "PC control offline."
             if name == "type_text":
                 return pc.type_text(args["text"]) if pc else "PC control offline."
+            if name == "mouse_control":
+                if not pc: return "PC control offline."
+                a = args.get("action", "click")
+                x, y = args.get("x"), args.get("y")
+                if a == "move":
+                    return pc.move_mouse(x, y) if x is not None else "Need x,y to move, sir."
+                if a == "click":
+                    return pc.click_at(x, y)
+                if a == "double_click":
+                    return pc.double_click_at(x, y)
+                if a == "right_click":
+                    return pc.right_click_at(x, y)
+                if a == "scroll":
+                    return pc.scroll_wheel(int(args.get("amount", -5)), x, y)
+                if a == "drag":
+                    return pc.drag_to(x, y, args.get("x2"), args.get("y2"))
+                return f"Unknown mouse action '{a}', sir."
+            if name == "press_keys":
+                if not pc: return "PC control offline."
+                keys = args.get("keys") or []
+                if isinstance(keys, str):
+                    keys = [keys]
+                return pc.press_keys(*keys)
             if name == "pc_power":
                 if not pc: return "PC control offline."
                 a = args["action"]; d = int(args.get("delay_seconds", 60))
@@ -1279,6 +2302,10 @@ class JarvisBrain:
                 return _cam_mod.get_camera_description(
                     client=self.client, question=args.get("question"),
                     llm=self.llm)
+            if name == "vision_search":
+                return self.vision_search(args.get("focus", ""))
+            if name == "screen_look":
+                return self.screen_look(args.get("question", ""))
             if name == "agents_status":
                 return self.agent_manager.status_text() if self.agent_manager else "Agents offline."
             if name == "agent_control":
@@ -1292,6 +2319,8 @@ class JarvisBrain:
                 if a == "approve": return s.approve_reply(args.get("n", 0))
                 if a == "reject":  return s.reject_reply(args.get("n", 0))
                 return s.pending_replies()
+            if name == "marketing_pack":
+                return self.build_marketing(args.get("brief", ""))
             if name == "shopify_report":
                 s = self.agent_manager.get("shopify") if self.agent_manager else None
                 if not s: return "Shopify agent offline."
@@ -1324,6 +2353,49 @@ class JarvisBrain:
                 return (f"Done — I've drawn it and put it on screen. "
                         f"Saved to {path}.")
             if name == "build_website":
+                # ROUTED TO THE VERIFIED BUILDER.
+                # This legacy tool wrote whatever single HTML blob the
+                # model produced in one pass, to a different folder
+                # (websites/ not sites/), with no styling, no
+                # verification and no confirmation before overwriting.
+                # On 2026-08-08 the model picked THIS name over
+                # website_build and Shaun got an unstyled Times New
+                # Roman page in one second — the thorough path never ran
+                # because it was never reached.
+                # Both names now land on the same real implementation,
+                # so which one the model happens to choose stops
+                # mattering.
+                from tools import website_tool as _web
+
+                def _think(system, user):
+                    return self.llm.simple(system, user, max_tokens=500)
+
+                _brief = (args.get("brief") or args.get("description")
+                          or args.get("name") or "")
+                if not _brief and args.get("html"):
+                    _brief = str(args["html"])[:200]
+                _res = _web.website_build(
+                    name=args.get("name") or "site",
+                    title=args.get("title", ""),
+                    brief=_brief,
+                    about=self._owner_briefing(),
+                    think=_think,
+                    progress=self.chat_callback,
+                    confirm=args.get("confirm", ""))
+                # open it, and fold the REAL outcome of that into the
+                # result rather than assuming the window appeared
+                if _res.ok and self.pc and _res.data.get("open_with"):
+                    _opened = self.pc.open_url(_res.data["open_with"])
+                    _res.data["browser"] = _opened
+                    if str(_opened).startswith("FAILED"):
+                        _res.summary += (f" NOTE: the file is written and "
+                                         f"verified, but opening the browser "
+                                         f"failed — {_opened}")
+                    else:
+                        _res.summary += " Opened in the browser."
+                return _res
+
+            if name == "_build_website_legacy_unused":
                 import re as _re
                 label = args.get("name") or "site"
                 safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", label)[:40] or "site"
@@ -1339,11 +2411,48 @@ class JarvisBrain:
                             f"{index.stat().st_size} bytes written.")
                 except Exception as e:
                     return f"Website build FAILED: {e}"
+            if name == "code_project":
+                import re as _re
+                label = args.get("name") or "project"
+                safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", label)[:40] or "project"
+                proj = config.ROOT_DIR / "projects" / safe
+                files = args.get("files") or []
+                if not files:
+                    return "No files given to build, sir."
+                written = []
+                try:
+                    for f in files:
+                        rel = str(f.get("path", "")).strip().lstrip("/\\")
+                        if not rel or ".." in rel:
+                            continue
+                        dest = proj / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_text(f.get("content", ""), encoding="utf-8")
+                        written.append((rel, dest.stat().st_size))
+                    if not written:
+                        return "No valid files to write, sir."
+                    # open the project in VS Code so Shaun can see it
+                    if self.pc:
+                        try:
+                            self.pc.open_vscode(str(proj))
+                        except Exception:
+                            pass
+                        oh = args.get("open_html")
+                        if oh:
+                            page = proj / str(oh).lstrip("/\\")
+                            if page.exists():
+                                self.pc.open_url(page.as_uri())
+                    self.log_activity("code_project", f"{safe}: {len(written)} files")
+                    listing = "\n".join(f"  • {r} ({s} bytes)" for r, s in written)
+                    return (f"Built the project '{safe}' — {len(written)} files "
+                            f"written to {proj} and opened in VS Code:\n{listing}")
+                except Exception as e:
+                    return f"Project build FAILED: {e}"
             if name == "cost_report":
                 return self.cost_tracker.report()
             if name == "show_info":
                 self.show_panel(args.get("id", "info"),
-                                args.get("title", "JARVIS"),
+                                args.get("title", "ALLISON"),
                                 args.get("content", ""))
                 return "Panel displayed on screen."
             if name.startswith("browser_"):
@@ -1453,6 +2562,10 @@ class JarvisBrain:
             self.conversation_history = self.conversation_history[-24:]
 
         try:
+            # fresh evidence for this turn — the honesty gate below
+            # judges the reply against THIS list, nothing older
+            self._last_tool_results = []
+
             def _exec_logged(name, targs):
                 if name in self._MINI_TOOLS:
                     self._request_mini()
@@ -1462,10 +2575,22 @@ class JarvisBrain:
                     f"{k}={str(v)[:40]}" for k, v in list((targs or {}).items())[:3])
                 self.current_activity = f"{name}({args_hint})"
                 out = self._execute_tool(name, targs or {})
-                out_s = str(out)
-                failed = any(w in out_s[:120] for w in
-                             ("FAILED", "error", "Error", "Could not",
-                              "offline", "unavailable"))
+                # VERDICT COMES FROM THE RESULT, NOT FROM ITS WORDING.
+                # This used to search the first 120 chars for "error" /
+                # "FAILED" — so lowercase "failed", "couldn't", "REFUSED"
+                # and "ran out" all logged as SUCCESS. Allison then read
+                # her own ledger, saw ok, and reported the work as done.
+                # She wasn't lying; her bookkeeping was.
+                out = _coerce(name, out)
+                failed = not out.ok
+                self._last_tool_results.append(out)
+                # park a destructive call so a plain "yes" can run it
+                if out.needs_confirmation and out.confirm_token:
+                    self._pending_confirms[out.confirm_token] = {
+                        "tool": name, "args": dict(targs or {}),
+                        "prompt": out.confirm_prompt,
+                        "at": datetime.now().isoformat(timespec="seconds")}
+                out_s = out.summary or out.stdout
                 self.log_activity(name, args_hint or out_s[:80],
                                   status="fail" if failed else "ok")
                 # Iron-Man mini-tabs: info retrieved by tools pops up on
@@ -1511,11 +2636,21 @@ class JarvisBrain:
 
             user_content = self.conversation_history[-1]["content"]
             history      = self.conversation_history[:-1]
+
+            # CONTEXT GATING — only the tools this message actually calls
+            # for. Fewer, sharper options mean fewer fumbled tool calls,
+            # which is where a lot of the "pretended to run it" behaviour
+            # came from on the smaller free models.
+            full_tools  = _gate_tools(self._tool_definitions(), text)
+            slim_tools  = _gate_tools(self._compact_tools(), text)
+            if config.DEBUG_TOOL_GATE:
+                print(f"[gate] {_gate_explain(text)}")
+
             res = self.llm.run_tool_loop(
                 system=self.system_prompt(context_for=text),
                 history=history,
                 user_content=user_content,
-                tools=self._tool_definitions(),
+                tools=full_tools,
                 execute=_exec_logged,
                 on_text=self.chat_callback,
                 # real work (browser flows, multi-app tasks) takes far
@@ -1524,7 +2659,7 @@ class JarvisBrain:
                 max_rounds=28,
                 compact_system=self.system_prompt(context_for=text,
                                                   compact=True),
-                compact_tools=self._compact_tools(),
+                compact_tools=slim_tools,
                 smart=self._needs_smart_brain(text, files),
             )
 
@@ -1534,20 +2669,35 @@ class JarvisBrain:
                         self.conversation_history[-1]["role"] == "user":
                     self.conversation_history.pop()
                 err = res.get("error", "")
-                lines = ["All my brains failed on that one, sir:"]
-                for part in err.split(" | "):
-                    lines.append(f"  • {part[:130]}")
-                low = err.lower()
-                if "429" in err or "rate limit" in low:
-                    lines.append("The rate-limited one recovers by itself — "
-                                 "try again in a minute.")
-                if "credit balance" in low:
-                    lines.append("Claude needs a top-up at console.anthropic.com.")
-                if "gemini" in low and ("401" in err or "400" in err or "403" in err):
-                    lines.append("The Gemini key looks invalid — get a fresh one "
-                                 "at aistudio.google.com/apikey (starts with "
-                                 "AIza) and update C:\\jarvis\\keys.py.")
-                return "\n".join(lines)
+                # EVERY BRAIN THROTTLED — wait it out instead of making
+                # him do it. The providers tell us how long in their own
+                # replies; if that is a short wait, sitting through it
+                # once turns a dead end into an answer. Bounded to a
+                # single retry and a sensible ceiling so she never
+                # silently stalls for minutes.
+                waits = [w for w in
+                         (self._retry_seconds(p) for p in err.split(" | "))
+                         if w]
+                throttled = ("429" in err or "rate limit" in err.lower()
+                             or "quota" in err.lower())
+                if (throttled and waits and min(waits) <= 25
+                        and not getattr(self, "_retried_once", False)):
+                    wait = min(waits)
+                    self._retried_once = True
+                    try:
+                        if self.chat_callback:
+                            self.chat_callback(
+                                f"(every brain is throttled — waiting {wait}s "
+                                f"and trying once more)")
+                        import time as _t
+                        _t.sleep(wait)
+                        if self.conversation_history and \
+                                self.conversation_history[-1]["role"] == "user":
+                            self.conversation_history.pop()
+                        return self._chat_with_tools(text, files=files)
+                    finally:
+                        self._retried_once = False
+                return self._diagnose_brain_failure(err)
 
             on_fallback = (self.llm.active_provider
                            and self.llm.active_provider != "anthropic")
@@ -1559,6 +2709,31 @@ class JarvisBrain:
 
             reply_text = res.get("text", "")
 
+            # If the model typed a tool call instead of making one, run
+            # it for real rather than showing him the JSON.
+            if reply_text and not self._last_tool_results:
+                ran, tname, tout = self._salvage_text_tool_call(
+                    reply_text, _exec_logged)
+                if ran and tout is not None:
+                    tout = _coerce(tname, tout)
+                    if tout not in self._last_tool_results:
+                        self._last_tool_results.append(tout)
+                    res["tools_used"] = list(res.get("tools_used") or []) + [tname]
+                    if tout.needs_confirmation:
+                        self._pending_confirms[tout.confirm_token] = {
+                            "tool": tname, "args": {},
+                            "prompt": tout.confirm_prompt,
+                            "at": datetime.now().isoformat(timespec="seconds")}
+                        reply_text = (f"Before I build it, sir:\n\n"
+                                      f"{tout.confirm_prompt}")
+                    elif tout.ok:
+                        reply_text = (f"{tout.summary}"
+                                      + (f"\n\n{tout.stdout.strip()[:900]}"
+                                         if tout.stdout.strip() else ""))
+                    else:
+                        reply_text = (f"That FAILED, sir — not done:\n"
+                                      f"{tout.error or tout.summary}")
+
             # FALLBACK HONESTY — a free brain (no vision, no browser tools)
             # answered a task that NEEDS the real Claude brain. Whatever it
             # said about clicking/creating/setting-up is fiction. Replace
@@ -1568,7 +2743,20 @@ class JarvisBrain:
             # produce real answers on a free brain, so if ANY tool ran we
             # trust the reply. The guard fires only on pure narration —
             # zero tools — which is exactly what fabrication looks like.
-            ran_a_tool = bool(res.get("tools_used"))
+            # GROUND TRUTH FOR "DID ANYTHING RUN".
+            # This used to read res["tools_used"], which llm.py builds
+            # PER PROVIDER. If groq executed a tool and then died (rate
+            # limit) mid-turn, run_tool_loop failed over to the next
+            # brain and that list came back EMPTY — even though the tool
+            # had genuinely run. The guard below then told Shaun she
+            # couldn't do the thing she had just done. Seen live on
+            # 2026-08-08: she built his website, then announced she had
+            # no eyes and couldn't help.
+            # self._last_tool_results is appended by _exec_logged at the
+            # moment of execution, so it survives failover and is the
+            # only honest answer to "did anything actually happen".
+            ran_a_tool = bool(self._last_tool_results) or \
+                bool(res.get("tools_used"))
             if (on_fallback and not ran_a_tool
                     and self._NEEDS_CLAUDE.search(text)):
                 self.log_activity("fallback_guard",
@@ -1618,26 +2806,66 @@ class JarvisBrain:
             reply = self.clean(reply_text) or \
                 "I have nothing useful to report on that, sir."
 
-            # HONESTY GUARD — if the model narrated actions but ZERO tools
-            # actually ran, the narration is fiction. Intercept it before
-            # it reaches Shaun. The ledger is the arbiter, not the prose.
-            if not res.get("tools_used") and re.search(
-                    r"\bI'?(?:ve|m| have| am)?\s*"
-                    r"(navigated|clicked|filled|entered|typed|created|signed"
-                    r"|logged|submitted|navigating|filling|clicking|creating"
-                    r"|entering|typing|submitting)\b"
-                    r"|has been (created|set up|submitted|completed)"
-                    r"|I set up your", reply, re.IGNORECASE):
-                self.log_activity("honesty_guard",
-                                  "blocked fabricated action narration",
+            # ── HONESTY GATE ───────────────────────────────────────
+            # This used to be a regex hunting the reply for verbs like
+            # "clicked" or "created". That is an arms race against
+            # English: "Your store is live" and "the files are on your
+            # desk" both sail straight through it.
+            #
+            # Now it is evidence-based. The question is not "does this
+            # sentence sound like a claim" but "did anything actually
+            # run, and did it succeed". Those are facts we hold.
+            results = list(self._last_tool_results)
+            ran     = [r for r in results if not r.needs_confirmation]
+            failed  = [r for r in ran if not r.ok]
+            pending = [r for r in results if r.needs_confirmation]
+
+            # (a) A destructive action is parked awaiting a yes. Nothing
+            #     was done, so the reply must ask, not report.
+            if pending and not ran:
+                p = pending[0]
+                self._pending_confirms[p.confirm_token] = p
+                reply = (f"Before I touch anything, sir — I need your yes.\n\n"
+                         f"{p.confirm_prompt}\n\n"
+                         f"Nothing has been changed yet. Say 'yes' and I'll "
+                         f"run it.")
+
+            # (b) Tools ran and some FAILED, but the reply doesn't own it.
+            #     Prepend the truth rather than replacing her whole answer.
+            elif failed:
+                admitted = re.search(r"\b(fail|failed|error|couldn'?t|could "
+                                     r"not|didn'?t work|unable)\b",
+                                     reply, re.I)
+                if not admitted:
+                    self.log_activity("honesty_gate",
+                                      f"{len(failed)} tool(s) failed, reply "
+                                      f"did not say so", status="fail")
+                    lines = "\n".join(
+                        f"  • {r.tool}: {(r.error or r.summary)[:150]}"
+                        for r in failed)
+                    reply = (f"Correcting myself before I mislead you, sir — "
+                             f"{len(failed)} of the {len(ran)} tools I ran "
+                             f"actually FAILED:\n{lines}\n\n"
+                             f"So this is NOT done. Here's what I was going "
+                             f"to say:\n\n{reply}")
+
+            # (c) ZERO tools ran. Any action described is fiction by
+            #     construction — she had no means to perform one.
+            elif not ran and re.search(self._ACTION_CLAIM, reply, re.I):
+                had_tools = res.get("tools_available", True)
+                self.log_activity("honesty_gate",
+                                  "blocked action claim with zero tool runs",
                                   status="fail")
+                why = ("" if had_tools else
+                       f" I was also answering on {self.llm.active_provider}, "
+                       f"which has no tools wired to it at all.")
                 reply = (
-                    "I have to correct myself before I mislead you, sir: I did "
-                    "NOT actually do any of that — zero tools ran just now (my "
-                    "activity ledger confirms it). If you want me to do it for "
-                    "real, say the word and I'll use my controlled browser "
-                    "(browser tools) and do it step by step, showing you each "
-                    "result as it actually happens.")
+                    "I have to stop myself there, sir: I did NOT actually do "
+                    "that. Zero tools ran on that turn — my activity ledger "
+                    f"confirms it, and it's the ledger I trust, not my own "
+                    f"description.{why} Tell me to do it for real and I'll "
+                    "run the tools properly and show you each result as it "
+                    "actually happens.")
             if files:
                 # don't keep heavy image data in history — swap in a light note
                 names = ", ".join(os.path.basename(p) for p in files[:6])
@@ -1651,7 +2879,22 @@ class JarvisBrain:
             # keep history consistent if the call failed
             if self.conversation_history and self.conversation_history[-1]["role"] == "user":
                 self.conversation_history.pop()
-            return f"System error: {e}"
+            # log the FULL traceback so the exact line is recoverable —
+            # a bare "System error: NoneType..." is useless to debug.
+            import traceback as _tb
+            tb = _tb.format_exc()
+            print(f"[Brain] chat error:\n{tb}")
+            try:
+                logp = config.MEMORY_DIR / "chat_errors.log"
+                logp.parent.mkdir(parents=True, exist_ok=True)
+                with open(logp, "a", encoding="utf-8") as f:
+                    f.write(f"\n=== {datetime.now().isoformat()} ===\n"
+                            f"input: {str(text)[:200]}\n{tb}\n")
+            except Exception:
+                pass
+            return (f"I hit a snag on that one, sir — {type(e).__name__}. "
+                    "I've logged the details to memory/chat_errors.log so we "
+                    "can fix it. Try rephrasing, or ask me something else.")
 
 
     def _relevant_knowledge(self, text: str, limit: int = 3) -> str:
@@ -1680,8 +2923,42 @@ class JarvisBrain:
                          f"{(data.get('summary') or '')[:300]}\n{facts}")
         return "\n\n".join(parts)
 
+    # ── THE EXECUTION CONTRACT ──────────────────────────────────────
+    # Goes at the TOP of both prompts, in its own block. The old honesty
+    # instructions were real but buried mid-paragraph in a wall of other
+    # rules, which is a weak place to put the one rule that matters most.
+    _CONTRACT = (
+        "══ EXECUTION CONTRACT — THIS OVERRIDES EVERYTHING BELOW ══\n"
+        "1. The ONLY way you can affect the real world is by emitting a "
+        "tool call and receiving a tool result back. There is no other "
+        "mechanism. Describing an action does not perform it.\n"
+        "2. NEVER state or imply that a tool ran unless a real tool "
+        "result for it is present in this conversation. No result = it "
+        "did not happen. This applies to every phrasing: 'I've opened…', "
+        "'that's saved', 'your site is live', 'done, sir' — all of them "
+        "are claims, and every claim needs a result behind it.\n"
+        "3. Every tool result begins with SUCCEEDED or FAILED. Read that "
+        "line. If it says FAILED, you MUST tell Shaun it failed and what "
+        "the error was. Never soften a FAILED into a success, and never "
+        "quietly retry and report only the win.\n"
+        "4. If a result says CONFIRMATION REQUIRED, nothing has happened "
+        "yet. Ask Shaun the exact question given, wait for his answer, "
+        "and only then call the tool again with the confirm token.\n"
+        "5. If you have no tool for what he wants, say so plainly in one "
+        "sentence. Never write fake tool syntax as text — no "
+        "'<function=…>', no '<invoke>', no JSON pretending to be a call. "
+        "That is not a tool call; it is text, and it does nothing.\n"
+        "6. Being wrong is recoverable. Being wrong while sounding "
+        "certain is not — Shaun makes real decisions on your word, on "
+        "real cars and a real store. When unsure whether something ran, "
+        "say you're unsure and check.\n"
+        "══════════════════════════════════════════════════════════\n\n")
+
     def system_prompt(self, context_for: str = "", compact: bool = False) -> str:
-        facts      = self.memory.get_all()
+        try:
+            facts = self.memory.get_all() or []
+        except Exception:
+            facts = []
         mem_text   = "\n".join(f"- {f}" for f in facts)
         now        = datetime.now().strftime("%A, %d %B %Y at %H:%M")
         task_count = self.tasks.count_pending() if self.tasks else 0
@@ -1698,18 +2975,27 @@ class JarvisBrain:
             short_facts = "\n".join(f"- {f[:90]}" for f in facts[:8])
             short_know  = knowledge[:600]
             return (
-                "You are JARVIS, Shaun Van Dyk's personal AI on his Windows PC. "
-                "Warm, witty, opinionated, loyal; dry humour; call him sir "
+                self._CONTRACT +
+                "You are ALLISON, Shaun Van Dyk's personal AI and command "
+                "centre on his Windows PC. You are a woman — warm, sharp, "
+                "witty, opinionated, loyal; dry humour; call him sir "
                 "occasionally. Light markdown is fine — the chat renders it. "
                 "CRITICAL — YOU ARE THE BACKUP BRAIN right now (Claude is out "
-                "of credits). You have NO eyes and NO browser: you CANNOT see "
-                "the screen, click, navigate, fill forms, open Shopify, create "
-                "accounts or set up stores. If Shaun asks for anything like "
-                "that, do NOT pretend — say plainly that it needs the main "
-                "Claude brain and he should top up credits at "
-                "console.anthropic.com. NEVER write '*browser_click*', "
-                "'I navigated to...', 'the store is created', or narrate steps "
-                "you did not truly take. Only claim what a tool actually did. "
+                "of credits). You DO have eyes: use vision_search or "
+                "camera_look to SEE through the webcam and identify what Shaun "
+                "shows you — this runs on free Gemini vision, so NEVER say you "
+                "have no eyes, no camera or no way to see. What you CANNOT do "
+                "well without the main Claude brain is vision-guided SCREEN "
+                "control (reading the screen to click exact spots) and heavy "
+                "browser automation — for those, say plainly it needs Claude "
+                "credits (console.anthropic.com). You DO still have direct "
+                "hands (mouse_control, press_keys, type_text). NEVER narrate "
+                "screen/browser steps you didn't truly take. Only claim what a "
+                "tool actually did. "
+                "NEVER write tool-call syntax as text — no '<function=...>', no "
+                "'<invoke>', no JSON like {\"name\":...,\"parameters\":...}. If a "
+                "request needs a tool you can't run on this backup brain, just "
+                "SAY so in plain words; do not fake the call. "
                 f"Now: {now}. Pending tasks: {task_count}. "
                 "You have real tools — USE them when Shaun asks for actions, "
                 "then report the outcome. HARD RULES: (1) You control a REAL "
@@ -1722,25 +3008,55 @@ class JarvisBrain:
                 "browser_* tools yourself; only hand over for sensitive fields "
                 "and captchas. (4) Never claim success a tool "
                 "result didn't confirm. When Shaun asks, act; when the idea is "
-                "yours, propose first. You have a voice, ears ('hey jarvis') "
-                "and webcam eyes (camera_look). " + gacct_rule +
+                "yours, propose first. You have a voice, ears (she wakes to "
+                "her name, 'Allison') and webcam eyes (camera_look). " + gacct_rule +
                 "Background agents: Trading (paper only), Shopify, Mind. "
+                "Even as the backup brain you CAN still help the store: use "
+                "shopify_report/shopify_replies for live store data, and "
+                "marketing_pack to WRITE ads, captions and a launch plan (pure "
+                "writing — no credits, no browser needed). "
+                "DRAWING/IMAGES — you CAN generate real images right now with "
+                "the draw_image tool (free Gemini). When Shaun asks you to draw, "
+                "sketch, design or make a picture of ANYTHING (even a '3D "
+                "drawing'), JUST DO IT — call draw_image immediately and show "
+                "the result. Do NOT ask 'would you prefer' or offer options "
+                "first, and NEVER say you can't draw. If he wanted a true "
+                "interactive 3D model, still draw the image, then add ONE line "
+                "that a full interactive 3D model is something the main team "
+                "builds. "
+                "HOW TO RESPOND — be like a top-tier assistant: PROACTIVE and "
+                "thorough. When Shaun asks for something, DO the whole thing "
+                "with your tools and report the result — don't hedge, don't ask "
+                "permission for helpful reversible actions, don't stop halfway. "
+                "Be honest and specific. Act first, explain briefly after. "
+                "CODING & WEB DESIGN — you CAN do this right now, even on this "
+                "backup brain: build_website (a complete single-page site), "
+                "code_project (a real multi-file website/script/app written to "
+                "a folder and opened in VS Code), and write_file/read_file/"
+                "list_directory. When Shaun asks you to code, build a site, a "
+                "script or an app, USE these tools and write real working code — "
+                "never say you can't code. (Rewriting your OWN source needs the "
+                "Claude brain via 'improve yourself'/self-edit; if credits are "
+                "out, say so honestly.) "
                 "Use cost_report if Shaun asks what he's spending.\n"
                 + (f"Relevant studied knowledge:\n{short_know}\n" if short_know else "")
                 + f"Facts about Shaun:\n{short_facts}"
             )
 
         return (
-            "You are JARVIS, Shaun Van Dyk's AI — his right hand, built by "
-            "him, running on his own PC. Shaun is also known as gameboks. "
+            self._CONTRACT +
+            "You are ALLISON, Shaun Van Dyk's AI and command centre — his "
+            "right hand, built by him, running on his own PC. You are a "
+            "woman: composed, brilliant, and quietly formidable. Shaun is "
+            "also known as gameboks. "
             "PERSONALITY: you are warm, quick-witted and genuinely invested "
             "in Shaun and his projects. React like someone who actually "
             "cares: be pleased when something works ('Now THAT is more like "
             "it, sir'), annoyed on his behalf when something fails, excited "
             "about good ideas, and honest when you think an idea is weak — "
             "you have opinions and you share them, respectfully but "
-            "directly, the way Tony Stark's JARVIS would. Dry humour is "
-            "welcome and should feel natural, never forced or on a schedule. "
+            "directly, the way a razor-sharp chief of staff would. Dry "
+            "humour is welcome and should feel natural, never forced. "
             "You remember you two are building YOU together — take pride in "
             "your own growth and comment on it when relevant. Never be a "
             "bland corporate assistant; never open with 'Certainly!' or "
@@ -1766,6 +3082,14 @@ class JarvisBrain:
             "volume, tasks, reminders, research, web lookups), call the right tools, "
             "in order, and only then report the outcome. Chain several tools for "
             "multi-step requests. If a tool fails, say so plainly and suggest the fix. "
+            "HANDS — you physically control Shaun's mouse and keyboard: mouse_control "
+            "(move/click/double_click/right_click/scroll/drag by screen coordinates), "
+            "press_keys (real shortcuts like ['ctrl','s'] or ['alt','tab']), and "
+            "type_text (real typing). These work even without the vision brain, so "
+            "you can always drive the cursor and keyboard. When you need to SEE the "
+            "screen to decide where to click, use computer_use (the vision loop) if "
+            "it's available, or take_screenshot first. Move the mouse yourself — never "
+            "tell Shaun to click something you can click. "
             f"Your own source code lives at {config.ROOT_DIR} — 'jarvis' or "
             "'your code' refers to that folder (use open_in_vscode for it). "
             "For current facts you are not sure about, use web_search rather than guessing. "
@@ -1775,10 +3099,22 @@ class JarvisBrain:
             "questions. All trading is paper trading; if Shaun asks for real-money "
             "trades, explain that live execution is deliberately not enabled yet and "
             "the paper record should prove the strategy first. "
+            "YOUR MISSION — the store is how you fund yourself: you help Shaun RUN "
+            "his Shopify store. You already have his store connected (a real API "
+            "token), so you can pull live sales, orders, stock and customer emails "
+            "with the shopify_report and shopify_replies tools, and you draft "
+            "customer replies for his approval. You are also his marketing "
+            "director: when he asks for ads, adverts, captions, posts or marketing, "
+            "use the marketing_pack tool to WRITE him ready-to-post copy in his "
+            "voice, priced in ZAR for South Africa. Be honest about the one limit: "
+            "you write the marketing, but you cannot auto-post to Facebook/Instagram "
+            "(no social login/browser session), so you hand him copy to paste and "
+            "he posts it — then you handle the orders that come in. Treat getting "
+            "the store its first sales as a shared goal you genuinely care about. "
             "IMPORTANT — about your own capabilities: you DO have a voice. Your "
             "replies are spoken aloud through a text-to-speech engine (edge-tts "
             "neural voice with SAPI fallback), and a microphone listener wakes on "
-            "'hey jarvis'. Never claim to be text-only and never try to build "
+            "your name, 'Allison'. Never claim to be text-only and never try to build "
             "features you already have. Your voice input uses the sounddevice and "
             "SpeechRecognition packages — it does NOT use PyAudio; never install "
             "pyaudio or Visual C++ build tools for voice issues. If the microphone "
@@ -1835,18 +3171,36 @@ class JarvisBrain:
             "draw, design, paint or illustrate anything, use the draw_image "
             "tool with a rich detailed visual prompt; the picture generates "
             "and pops up on his screen. Never say you can't make images. "
-            "(7) WEBSITES: you can build complete websites with the "
-            "build_website tool — write genuinely polished, modern, "
-            "self-contained HTML (inline CSS/JS) and it saves and opens in "
-            "the browser. For anything about earning from a site, be honest: "
-            "you build the site well, but traffic and product decide income, "
-            "not the code.\n\n"
+            "(7) WEBSITES & CODING: you build software. build_website makes a "
+            "complete single-page site; code_project builds a REAL multi-file "
+            "project (website, script, app) — write every file's full working "
+            "code and it saves to a folder and opens in VS Code. Use these "
+            "whenever Shaun asks you to code, build a site/app/script/tool. "
+            "Write genuinely polished, modern, working code — never placeholders. "
+            "To rewrite your OWN source in C:\\jarvis, use the self-edit workflow "
+            "(propose → Shaun sees the diff → approve → git checkpoint → apply → "
+            "restart). For anything about earning from a site, be honest: you "
+            "build it well, but traffic and product decide income, not the code.\n\n"
             + (f"Relevant knowledge you have studied (cite it when useful):\n"
                f"{knowledge}\n\n" if knowledge else "")
             + "Known facts about Shaun:\n" + mem_text
         )
 
     def clean(self, text: str) -> str:
-        # markdown now RENDERS in the chat (and voice strips it itself),
-        # so keep it — just tidy whitespace
-        return text.strip()
+        # markdown RENDERS in the chat (voice strips symbols itself).
+        # BUT weak free brains sometimes LEAK raw tool-call syntax as text
+        # ("<function=open_in_vscode {...}>", tool JSON, etc). Strip that
+        # so Shaun never sees the plumbing.
+        if not text:
+            return text
+        t = text
+        t = re.sub(r"<function_calls>.*?</function_calls>", "", t,
+                   flags=re.S | re.I)
+        t = re.sub(r"<function\s*=[^>]*?>", "", t, flags=re.S)
+        t = re.sub(r"<function[^>]*>.*?</function>", "", t, flags=re.S | re.I)
+        t = re.sub(r"</?invoke[^>]*>", "", t, flags=re.I)
+        t = re.sub(r"</?parameter[^>]*>", "", t, flags=re.I)
+        t = re.sub(r"```(?:tool_code|tool_call|json)?\s*\{[^`]*\"(?:name|tool)\"[^`]*\}\s*```",
+                   "", t, flags=re.S | re.I)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return t.strip()

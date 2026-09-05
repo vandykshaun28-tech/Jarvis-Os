@@ -49,7 +49,35 @@ CREATE_NO_WINDOW = 0x08000000
 _EMOJI = re.compile(
     "[\U0001F000-\U0001FAFF\U00002700-\U000027BF\U0001F1E6-\U0001F1FF"
     "\U00002600-\U000026FF⭐✅❌]+")
-_URL = re.compile(r"https?://\S+")
+_URL = re.compile(r"\bhttps?://\S+", re.I)
+# bare domains like shopify.com, vandykstore.myshopify.com, example.co.za —
+# only when they END in a known TLD, so we don't mangle "e.g." or "3.5".
+_BARE_DOMAIN = re.compile(
+    r"\b(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*"
+    r"\.(?:com|net|org|io|co|za|uk|us|dev|app|ai|store|shop|info|biz|me|tv|"
+    r"gov|edu|myshopify)(?:/\S*)?\b", re.I)
+_IPADDR = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b")
+_WINPATH = re.compile(r"\b[A-Za-z]:\\[^\s,;]+")
+
+# labels we drop from the end of a hostname so she says the SITE NAME only
+_TLD_LABELS = {"com", "net", "org", "io", "co", "za", "uk", "us", "dev",
+               "app", "ai", "store", "shop", "info", "biz", "me", "tv",
+               "gov", "edu", "www", "myshopify"}
+
+
+def _url_to_name(raw: str) -> str:
+    """Turn a URL/domain into how a person would SAY it — just the site
+    name. 'http://shopify.com/admin' -> 'shopify'; an IP -> 'the local link'."""
+    host = re.sub(r"^[a-z]+://", "", raw, flags=re.I)   # drop protocol
+    host = host.split("/")[0].split("?")[0].split("#")[0]  # drop path/query
+    host = re.sub(r":\d+$", "", host)                    # drop port
+    host = re.sub(r"^www\.", "", host, flags=re.I)
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+        return "the local link"
+    labels = [l for l in host.split(".") if l]
+    while len(labels) > 1 and labels[-1].lower() in _TLD_LABELS:
+        labels.pop()
+    return " ".join(labels) if labels else "the site"
 
 
 def _speakable(text: str) -> str:
@@ -60,7 +88,13 @@ def _speakable(text: str) -> str:
     text = re.sub(r"```[a-zA-Z0-9_+-]*\n?.*?```",
                   " — code is on screen — ", text, flags=re.S)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)   # md links FIRST
-    text = _URL.sub("a link", text)
+    # speak URLs / domains as the SITE NAME, not the raw address:
+    #   http://shopify.com/admin  ->  "shopify"
+    #   vandykstore.myshopify.com ->  "vandykstore"
+    text = _WINPATH.sub("a file on the PC", text)          # C:\... -> "a file"
+    text = _URL.sub(lambda m: _url_to_name(m.group(0)), text)
+    text = _BARE_DOMAIN.sub(lambda m: _url_to_name(m.group(0)), text)
+    text = _IPADDR.sub("the local link", text)
     text = _EMOJI.sub("", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)   # bold
     text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)  # italics
